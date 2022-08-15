@@ -1,0 +1,103 @@
+digraph A {
+    node [shape=box margin=0.5]
+    team_1 [label="Team (Tm)"]
+    squad_1 [label="Squad (Sqd)"]
+    platoon_1 [label="Platoon (Plt)"]
+    company_1 [label="Company (Co)"]
+    battalion_1 [label="Battalion (Bn)"]
+    brigade_1 [label="Brigade (Bde)"]
+    division_1 [label="Division (Div)"]
+    corps_1 [label="Corps"]
+    army_1 [label="Army"]
+    command_1 [label="Command (Cmd)"]
+    regiment_1 [label="Regiment (Regt)"]
+    group_1 [label="Group (Grp)"]
+
+    comment="army level"
+
+    army_2 [label="Army"]
+    army_hq_1 [label="Army HQ"]
+    army_spt_cmd_1 [label="Army Spt Cmd"]
+    corps_2 [label="Corps 1"]
+    corps_3 [label="Corps 2"]
+    corps_4 [label="Corps 3"]
+
+    army_2 -> army_hq_1
+    army_2 -> army_spt_cmd_1
+    army_2 -> corps_2
+    army_2 -> corps_3
+    army_2 -> corps_4
+
+
+    comment="corps level"
+
+    corps_2_hq_cmd [label="Corps 1 HQ"]
+    mnvr_div_1 [label="Mnvr Div 1"]
+    mnvr_div_2 [label="Mnvr Div 2"]
+    mnvr_div_3 [label="Mnvr Div 3"]
+    corps_2_spt_cmd [label="Corps 1 Spt Cmd"]
+
+    comment="division level"
+
+    hq_bde_1 [label="Mnvr Div 1 HQ Bde"]
+    mnvr_bde_1 [label="Mnvr Bde 1"]
+    mnvr_bde_2 [label="Mnvr Bde 2"]
+    mnvr_bde_3 [label="Mnvr Bde 3"]
+    spt_bde_1 [label="Mnvr Div 1 Spt Bde"]
+
+    mnvr_div_1 -> hq_bde_1
+    mnvr_div_1 -> mnvr_bde_1
+    mnvr_div_1 -> mnvr_bde_2
+    mnvr_div_1 -> mnvr_bde_3
+    mnvr_div_1 -> spt_bde_1
+
+
+    comment="brigade level"
+
+    hq_bn_1 [label="Mnvr Bde 1 HQ Bn"]
+    mnvr_bn_1 [label="Mnvr Bn 1"]
+    mnvr_bn_2 [label="Mnvr Bn 2"]
+    mnvr_bn_3 [label="Mnvr Bn 3"]
+    spt_bn_1 [label="Spt Bn 1"]
+
+    mnvr_bde_1 -> hq_bn_1
+    mnvr_bde_1 -> mnvr_bn_1
+    mnvr_bde_1 -> mnvr_bn_2
+    mnvr_bde_1 -> mnvr_bn_3
+    mnvr_bde_1 -> spt_bn_1
+
+
+    comment="battalion level"
+
+
+
+    comment="basic organization"
+
+    army_1 -> corps_1
+    corps_1 -> division_1
+    division_1 -> brigade_1
+    brigade_1 -> battalion_1
+    battalion_1 -> company_1
+    company_1 -> platoon_1
+    platoon_1 -> squad_1
+    squad_1 -> team_1
+
+    brigade_1 -> group_1
+    brigade_1 -> regiment_1
+    group_1 -> battalion_1
+    regiment_1 -> battalion_1
+
+    army_1 -> command_1
+    command_1 -> army_1
+    corps_1 -> command_1
+    division_1 -> command_1
+
+
+
+    corps_2 -> corps_2_hq_cmd
+    corps_2 -> mnvr_div_1
+    corps_2 -> mnvr_div_2
+    corps_2 -> mnvr_div_3
+    corps_2 -> corps_2_spt_cmd
+
+}
