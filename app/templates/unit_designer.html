@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- SortableJS for drag-and-drop tree -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+
+<div class="h-full flex flex-col md:flex-row gap-4" style="height: calc(100vh - 100px);">
+
+    <!-- LEFT PANEL: Assets -->
+    <div class="w-full md:w-1/4 bg-gray-800 rounded-lg p-4 flex flex-col">
+        <h2 class="text-xl font-bold mb-4 text-blue-400">Asset Pool</h2>
+        <div class="overflow-y-auto flex-grow space-y-2">
+            {% for asset in assets %}
+            <div class="bg-gray-700 p-2 rounded border border-gray-600 flex justify-between items-center cursor-move asset-item"
+                data-asset-id="{{ asset.id }}">
+                <span>{{ asset.name }}</span>
+                <span class="text-xs text-gray-400">{{ asset.chassis_type }}</span>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="mt-4 pt-4 border-t border-gray-700">
+            <h3 class="text-sm font-bold mb-2">Create Wrapper Unit</h3>
+            <form id="create-unit-form" class="flex flex-col gap-2">
+                <input type="text" id="new-unit-name" placeholder="Unit Name (e.g. 1st Platoon)"
+                    class="bg-gray-900 border border-gray-600 rounded p-1 text-white">
+                <select id="new-unit-type" class="bg-gray-900 border border-gray-600 rounded p-1 text-white">
+                    <option value="HQ">HQ</option>
+                    <option value="Line">Line</option>
+                    <option value="Support">Support</option>
+                </select>
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white rounded p-1">Create Root
+                    Unit</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- CENTER PANEL: Unit Tree -->
+    <div class="w-full md:w-2/4 bg-gray-900 rounded-lg p-4 flex flex-col relative overflow-hidden">
+        <h2 class="text-xl font-bold mb-4 text-center text-white">Formation Structure (TO&E)</h2>
+
+        <div class="flex-grow overflow-y-auto pr-2" id="unit-tree-root">
+            {% macro render_unit(unit, depth=0) %}
+            <div class="ml-{{ depth * 4 }} mt-2" data-id="{{ unit.id }}">
+                <div class="bg-gray-800 p-2 rounded border border-gray-700 flex justify-between items-center group hover:border-blue-500"
+                    hx-get="/api/units/{{ unit.id }}/stats" hx-target="#unit-stats-content" cursor-pointer>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs bg-gray-600 px-1 rounded">{{ unit.unit_type }}</span>
+                        <span class="font-bold">{{ unit.name }}</span>
+                    </div>
+                    <span class="text-xs text-gray-500 opacity-0 group-hover:opacity-100">Drag to move</span>
+                </div>
+
+                <!-- Nested Sortable Container -->
+                <div class="nested-sortable pl-4 border-l border-gray-700 ml-2 min-h-[10px]"
+                    data-parent-id="{{ unit.id }}">
+                    {% for child in unit.children %}
+                    {{ render_unit(child, depth + 1) }}
+                    {% endfor %}
+                </div>
+            </div>
+            {% endmacro %}
+
+            <div id="tree-container" class="space-y-2">
+                {% for root in roots %}
+                {{ render_unit(root) }}
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <!-- RIGHT PANEL: Commander's Dashboard -->
+    <div class="w-full md:w-1/4 bg-gray-800 rounded-lg p-4">
+        <h2 class="text-xl font-bold mb-4 text-yellow-400">Commander's Dashboard</h2>
+        <div id="unit-stats-content">
+            <p class="text-gray-500 text-sm">Select a unit in the tree to view aggregated logistics and C2 stats.</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 1. Handle Unit Creation
+    document.getElementById('create-unit-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('new-unit-name').value;
+        if (!name) return;
+
+        const type = document.getElementById('new-unit-type').value;
+
+        const res = await fetch('/api/units', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, unit_type: type })
+        });
+
+        if (res.ok) {
+            window.location.reload(); // Simple reload to refresh tree
+        }
+    });
+
+    // 2. Initialize SortableJS for nested lists involves recursion or finding all containers
+    // For simplicity in this non-recursive DOM structure example, we'll target the known containers
+
+    // Actually, making the tree truly sortable with arbitrary depth in vanilla JS + Sortable is tricky without a framework.
+    // We will implement a simplified version: All `.nested-sortable` and `#tree-container` are sortable groups.
+
+    const containers = document.querySelectorAll('.nested-sortable, #tree-container');
+    containers.forEach(el => {
+        new Sortable(el, {
+            group: 'nested', // allow dragging between lists
+            animation: 150,
+            fallbackOnBody: true,
+            swapThreshold: 0.65,
+            onEnd: async function (evt) {
+                const itemEl = evt.item;
+                const newParentEl = evt.to;
+                const unitId = itemEl.getAttribute('data-id');
+                // The parent ID is stored on the container div
+                // If moved to root (#tree-container), parent is null
+                let newParentId = newParentEl.getAttribute('data-parent-id');
+                if (newParentEl.id === 'tree-container') newParentId = null;
+
+                if (unitId) {
+                    // Call API to update parent
+                    await fetch(`/api/units/${unitId}/move`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ parent_id: newParentId ? parseInt(newParentId) : null })
+                    });
+
+                    // Ideally we'd trigger a recalculation of stats too if the old or new parent was selected
+                }
+            }
+        });
+    });
+</script>
+{% endblock %}

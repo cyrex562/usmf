@@ -1,0 +1,57 @@
+<div class="space-y-4">
+    <div class="{% if valid %}text-green-400{% else %}text-red-400{% endif %} font-bold mb-2">
+        {% if valid %}
+        DESIGN VALID
+        {% else %}
+        DESIGN INVALID
+        {% endif %}
+    </div>
+
+    {% if violations %}
+    <ul class="text-red-400 text-sm list-disc pl-4 mb-4">
+        {% for v in violations %}
+        <li>{{ v }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <div>
+        <div class="flex justify-between text-sm text-gray-400">
+            <span>Weight</span>
+            <span>{{ stats.weight }} / {{ stats.max_weight }}</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2.5 mt-1">
+            <div class="bg-blue-600 h-2.5 rounded-full"
+                style="width: {% if stats.max_weight > 0 %}{{ (stats.weight / stats.max_weight) * 100 }}{% else %}0{% endif %}%">
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <div class="flex justify-between text-sm text-gray-400 mt-4">
+            <span>Space</span>
+            <span>{{ stats.current_sapce }} / {{ stats.max_space }}</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2.5 mt-1">
+            <div class="bg-purple-600 h-2.5 rounded-full"
+                style="width: {% if stats.max_space > 0 %}{{ (stats.current_sapce / stats.max_space) * 100 }}{% else %}0{% endif %}%">
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-2 mt-4 text-center">
+        <div class="bg-gray-700 p-2 rounded">
+            <div class="text-xs text-gray-400">Power Gen</div>
+            <div class="text-lg font-bold text-yellow-400">{{ stats.power_gen }}</div>
+        </div>
+        <div class="bg-gray-700 p-2 rounded">
+            <div class="text-xs text-gray-400">Power Draw</div>
+            <div class="text-lg font-bold text-red-400">{{ stats.power_draw }}</div>
+        </div>
+    </div>
+
+    <div class="mt-4 text-center">
+        <div class="text-xs text-gray-400">Total Cost</div>
+        <div class="text-2xl font-bold text-green-500">${{ stats.cost }}</div>
+    </div>
+</div>

@@ -1,0 +1,9 @@
+<ul class="space-y-2">
+    {% for component in components %}
+    <li class="bg-gray-700 p-2 rounded cursor-pointer hover:bg-gray-600 flex justify-between items-center draggable-source"
+        draggable="true" data-id="{{ component.id }}" data-name="{{ component.name }}">
+        <span>{{ component.name }}</span>
+        <span class="text-xs text-gray-400">{{ component.type }}</span>
+    </li>
+    {% endfor %}
+</ul>

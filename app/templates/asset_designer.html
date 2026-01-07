@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="h-full flex flex-col md:flex-row gap-4" style="height: calc(100vh - 100px);">
+
+    <!-- LEFT PANEL: Component Library -->
+    <div class="w-full md:w-1/4 bg-gray-800 rounded-lg p-4 flex flex-col">
+        <h2 class="text-xl font-bold mb-4 text-blue-400">Components</h2>
+        <div class="overflow-y-auto flex-grow">
+            {% include "partials/component_list.html" %}
+        </div>
+    </div>
+
+    <!-- CENTER PANEL: Assembly Area -->
+    <div class="w-full md:w-2/4 bg-gray-900 rounded-lg p-4 flex flex-col border-2 border-dashed border-gray-700 relative"
+        id="assembly-area">
+        <h2 class="text-xl font-bold mb-4 text-center text-white">Assembly Area</h2>
+
+        <form id="asset-form" hx-post="/api/assets/validate" hx-trigger="change, updateStats" hx-target="#hud-stats"
+            class="h-full flex flex-col">
+
+            <div class="mb-4">
+                <label class="block text-gray-400 text-sm font-bold mb-2" for="chassis_type">Chassis Type</label>
+                <select name="chassis_type" id="chassis_type"
+                    class="w-full bg-gray-800 text-white border border-gray-600 rounded p-2 focus:outline-none focus:border-blue-500">
+                    {% for type in chassis_types %}
+                    <option value="{{ type }}">{{ type }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div id="slotted-components" class="flex-grow bg-gray-800/50 rounded p-4 overflow-y-auto space-y-2">
+                <p class="text-gray-500 text-center italic" id="empty-state">Drag components here</p>
+                <!-- Slots will go here -->
+            </div>
+
+        </form>
+    </div>
+
+    <!-- RIGHT PANEL: HUD -->
+    <div class="w-full md:w-1/4 bg-gray-800 rounded-lg p-4">
+        <h2 class="text-xl font-bold mb-4 text-yellow-400">Analysis HUD</h2>
+        <div id="hud-stats">
+            <!-- Initial state or empty placeholder -->
+            <p class="text-gray-500 text-sm">Select chassis and adds components to see stats.</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    const sources = document.querySelectorAll('.draggable-source');
+    const target = document.getElementById('assembly-area');
+    const slots = document.getElementById('slotted-components');
+    const emptyState = document.getElementById('empty-state');
+    let componentCount = 0;
+
+    sources.forEach(source => {
+        source.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', JSON.stringify({
+                id: source.dataset.id,
+                name: source.dataset.name
+            }));
+        });
+    });
+
+    target.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        target.classList.add('border-blue-500');
+    });
+
+    target.addEventListener('dragleave', (e) => {
+        target.classList.remove('border-blue-500');
+    });
+
+    target.addEventListener('drop', (e) => {
+        e.preventDefault();
+        target.classList.remove('border-blue-500');
+        if (emptyState) emptyState.style.display = 'none';
+
+        const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+        componentCount++;
+
+        const div = document.createElement('div');
+        div.className = "bg-gray-700 p-2 rounded flex justify-between items-center";
+        div.innerHTML = `
+            <span>${data.name}</span>
+            <input type="hidden" name="component_id_${componentCount}" value="${data.id}">
+            <div class="flex items-center space-x-2">
+                <input type="number" 
+                       name="quantity_${componentCount}" 
+                       value="1" 
+                       min="1" 
+                       class="w-16 bg-gray-900 text-white rounded p-1 text-center"
+                       onchange="document.getElementById('asset-form').dispatchEvent(new Event('updateStats'))">
+                <button type="button" class="text-red-400 hover:text-red-300" onclick="this.parentElement.parentElement.remove(); document.getElementById('asset-form').dispatchEvent(new Event('updateStats'))">&times;</button>
+            </div>
+        `;
+        slots.appendChild(div);
+
+        // Trigger HTMX update
+        document.getElementById('asset-form').dispatchEvent(new Event('updateStats'));
+    });
+
+    // Determine initial stats trigger
+    setTimeout(() => {
+        document.getElementById('asset-form').dispatchEvent(new Event('updateStats'));
+    }, 500);
+</script>
+{% endblock %}
