@@ -25,3 +25,17 @@
         </div>
     </div>
 </div>
+
+<h3 class="text-lg font-bold mt-4 mb-2 text-purple-400">Unit Capabilities</h3>
+{% if stats.capabilities %}
+<div class="grid grid-cols-2 gap-2">
+    {% for capability, level in stats.capabilities.items() %}
+    <div class="bg-gray-700 p-2 rounded">
+        <div class="text-xs text-gray-400">{{ capability }}</div>
+        <div class="text-lg font-bold text-purple-300">Level {{ level }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="text-gray-400 text-sm italic">No special capabilities</p>
+{% endif %}

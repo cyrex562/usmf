@@ -89,49 +89,85 @@ async def validate_asset_logic(
 
 async def calculate_unit_stats(session: AsyncSession, unit_id: int) -> Dict:
     """
-    Recursively calculates stats for a unit tree.
+    Recursively calculates stats for a unit tree, including capability aggregation.
     """
-    # 1. Fetch Unit with children eagerly?
-    # For now, let's do a recursive fetch or assume we have the tree loaded.
-    # In async SQLAlchemy, lazy loading is tricky. Best to write a recursive CTE query or fetch all units and build tree in memory.
-    # For V2 prototype, let's fetch all and build tree in memory (efficiency tradeoff).
-
+    # Fetch all units
     result = await session.execute(select(Unit))
     all_units = result.scalars().all()
 
-    # Build map
+    # Build unit maps
     unit_map = {u.id: u for u in all_units}
     children_map = {}
     for u in all_units:
         if u.parent_id:
             children_map.setdefault(u.parent_id, []).append(u)
 
-    # Also fetch all assets and components to calculate base stats
-    # This is getting heavy, but for a prototype it's fine.
-    # Optimization: In a real app, we'd cache stats on the Unit model.
+    # Fetch all assets with their components for capability extraction
+    from .models import AssetComponent
 
-    # For now, let's just implement the logic for a single node and its subtree assuming generic "supply" usage
+    result = await session.execute(select(Asset))
+    all_assets = result.scalars().all()
+    asset_map = {a.id: a for a in all_assets}
+
+    # Build asset -> capabilities map
+    asset_capabilities = {}
+    for asset in all_assets:
+        capabilities = {}
+        # Fetch components for this asset
+        result = await session.execute(
+            select(AssetComponent).where(AssetComponent.asset_id == asset.id)
+        )
+        asset_components = result.scalars().all()
+
+        for ac in asset_components:
+            # Fetch the component details
+            comp_result = await session.execute(
+                select(Component).where(Component.id == ac.component_id)
+            )
+            component = comp_result.scalars().first()
+            if component and component.stats:
+                comp_caps = component.stats.get("capabilities", {})
+                for cap_name, cap_level in comp_caps.items():
+                    # Multiply by quantity and sum
+                    capabilities[cap_name] = capabilities.get(cap_name, 0) + (
+                        cap_level * ac.quantity
+                    )
+
+        asset_capabilities[asset.id] = capabilities
 
     def aggregate(uid):
         unit = unit_map.get(uid)
         if not unit:
-            return {"weight": 0, "cost": 0, "supply": 0, "personnel": 0}
+            return {
+                "weight": 0,
+                "cost": 0,
+                "supply": 0,
+                "personnel": 0,
+                "capabilities": {},
+            }
 
         stats = {
             "weight": 0,
             "cost": 0,
             "supply": 0,
             "personnel": 100,
-        }  # Placeholder personnel
+            "capabilities": {},
+        }
 
-        # If unit has an asset, add its weight/cost (Implementation TODO: fetch specific asset stats)
-        # For this prototype, we'll estimate based on unit_type or asset_id presence
-        if unit.asset_id:
+        # If unit has an asset, add its stats and capabilities
+        if unit.asset_id and unit.asset_id in asset_map:
             stats["weight"] += 5000  # Dummy value
             stats["cost"] += 1000  # Dummy value
             stats["supply"] += 50  # Daily supply consumption
 
-        # Recurse
+            # Add asset capabilities
+            asset_caps = asset_capabilities.get(unit.asset_id, {})
+            for cap_name, cap_level in asset_caps.items():
+                stats["capabilities"][cap_name] = (
+                    stats["capabilities"].get(cap_name, 0) + cap_level
+                )
+
+        # Recurse through children
         children = children_map.get(uid, [])
         for child in children:
             child_stats = aggregate(child.id)
@@ -139,6 +175,12 @@ async def calculate_unit_stats(session: AsyncSession, unit_id: int) -> Dict:
             stats["cost"] += child_stats["cost"]
             stats["supply"] += child_stats["supply"]
             stats["personnel"] += child_stats["personnel"]
+
+            # Aggregate capabilities from children
+            for cap_name, cap_level in child_stats.get("capabilities", {}).items():
+                stats["capabilities"][cap_name] = (
+                    stats["capabilities"].get(cap_name, 0) + cap_level
+                )
 
         return stats
 

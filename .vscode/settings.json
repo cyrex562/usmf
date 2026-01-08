@@ -1,0 +1,11 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "local dev db",
+            "database": "usmf.db"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
+}

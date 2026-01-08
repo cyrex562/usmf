@@ -29,12 +29,26 @@ INITIAL_COMPONENTS = [
             "power_draw": 10,
             "damage": 80,
             "cost": 1500,
+            "capabilities": {
+                "Direct Fire": 4,
+                "Anti-Armor": 5,
+            },
         },
     },
     {
         "name": "7.62mm Machine Gun",
         "type": "Weapon",
-        "stats": {"weight": 20, "space": 1, "power_draw": 0, "damage": 5, "cost": 100},
+        "stats": {
+            "weight": 20,
+            "space": 1,
+            "power_draw": 0,
+            "damage": 5,
+            "cost": 100,
+            "capabilities": {
+                "Direct Fire": 1,
+                "Anti-Personnel": 3,
+            },
+        },
     },
     {
         "name": "Lidar Sensor array",
@@ -45,12 +59,25 @@ INITIAL_COMPONENTS = [
             "power_draw": 50,
             "range": 2000,
             "cost": 800,
+            "capabilities": {
+                "Reconnaissance": 3,
+                "Target Acquisition": 2,
+            },
         },
     },
     {
         "name": "Optical Scope",
         "type": "Sensor",
-        "stats": {"weight": 2, "space": 1, "power_draw": 0, "range": 800, "cost": 200},
+        "stats": {
+            "weight": 2,
+            "space": 1,
+            "power_draw": 0,
+            "range": 800,
+            "cost": 200,
+            "capabilities": {
+                "Reconnaissance": 1,
+            },
+        },
     },
     {
         "name": "Standard Ration Pack",
@@ -65,7 +92,15 @@ INITIAL_COMPONENTS = [
     {
         "name": "Composite Armor Plate",
         "type": "Armor",
-        "stats": {"weight": 100, "space": 1, "armor_value": 50, "cost": 300},
+        "stats": {
+            "weight": 100,
+            "space": 1,
+            "armor_value": 50,
+            "cost": 300,
+            "capabilities": {
+                "Protection": 2,
+            },
+        },
     },
     {
         "name": "Cyberdeck Mk1",
@@ -76,6 +111,10 @@ INITIAL_COMPONENTS = [
             "power_draw": 20,
             "cyber_attack": 40,
             "cost": 1200,
+            "capabilities": {
+                "Cyber": 3,
+                "Electronic Warfare": 2,
+            },
         },
     },
 ]

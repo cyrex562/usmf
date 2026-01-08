@@ -41,3 +41,43 @@ class UnitResponse(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class ScenarioForceCreate(BaseModel):
+    side_name: str
+    root_unit_id: int
+    starting_morale: int = 100
+    starting_supply: int = 1000
+
+
+class ScenarioForceResponse(BaseModel):
+    id: int
+    side_name: str
+    root_unit_id: int
+    starting_morale: int
+    starting_supply: int
+
+    class Config:
+        from_attributes = True
+
+
+class ScenarioCreate(BaseModel):
+    name: str
+    description: str
+    terrain_type: str
+    weather: str = "Clear"
+    duration_hours: int = 24
+    forces: List[ScenarioForceCreate]
+
+
+class ScenarioResponse(BaseModel):
+    id: int
+    name: str
+    description: str
+    terrain_type: str
+    weather: str
+    duration_hours: int
+    forces: List[ScenarioForceResponse]
+
+    class Config:
+        from_attributes = True
