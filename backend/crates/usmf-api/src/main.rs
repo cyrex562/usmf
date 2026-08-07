@@ -1,7 +1,7 @@
 mod routes;
 mod state;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use state::AppState;
 use tower_http::cors::CorsLayer;
@@ -24,6 +24,16 @@ async fn main() -> anyhow::Result<()> {
             get(routes::list_components).post(routes::create_component),
         )
         .route("/api/components/{id}", get(routes::get_component))
+        .route(
+            "/api/chassis-specs",
+            get(routes::list_chassis_specs).post(routes::create_chassis_spec),
+        )
+        .route(
+            "/api/assets",
+            get(routes::list_assets).post(routes::create_asset),
+        )
+        .route("/api/assets/{id}", get(routes::get_asset))
+        .route("/api/assets/validate", post(routes::validate_asset_draft))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

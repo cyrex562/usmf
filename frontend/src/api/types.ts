@@ -19,6 +19,7 @@ export interface ComponentStats {
   power_draw: number
   damage: number
   range_hexes: number
+  initiative: number
   capabilities: Record<string, number>
 }
 
@@ -33,4 +34,52 @@ export type CreateComponentRequest = {
   name: string
   component_type: ComponentType
   stats: Partial<ComponentStats>
+}
+
+export interface ChassisSpec {
+  name: string
+  max_weight: number
+  max_space: number
+  base_cost: number
+}
+
+export type CreateChassisSpecRequest = ChassisSpec
+
+export interface AssetComponent {
+  component_id: number
+  quantity: number
+}
+
+export interface Asset {
+  id: number
+  name: string
+  chassis_type: string
+  components: AssetComponent[]
+}
+
+export type CreateAssetRequest = {
+  name: string
+  chassis_type: string
+  components: AssetComponent[]
+}
+
+export interface AssetTotals {
+  weight: number
+  space: number
+  cost: number
+  power_gen: number
+  power_draw: number
+  initiative: number
+  capabilities: Record<string, number>
+}
+
+export interface AssetValidation {
+  valid: boolean
+  violations: string[]
+  totals: AssetTotals
+}
+
+export type ValidateAssetRequest = {
+  chassis_type: string
+  components: AssetComponent[]
 }

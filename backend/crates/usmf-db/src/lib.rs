@@ -1,5 +1,9 @@
+mod assets;
+mod chassis_specs;
 mod components;
 
+pub use assets::AssetRepo;
+pub use chassis_specs::ChassisSpecRepo;
 pub use components::ComponentRepo;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

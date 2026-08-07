@@ -8,6 +8,14 @@ CREATE TABLE chassis_specs (
     base_cost REAL NOT NULL
 );
 
+-- Starter chassis types mirroring the V2 prototype's hardcoded CHASSIS_SPECS
+-- dict (legacy/python_prototype/app/services.py), so the Asset Designer isn't
+-- empty on first run. Users can add more via the chassis-specs API.
+INSERT INTO chassis_specs (name, max_weight, max_space, base_cost) VALUES
+    ('Heavy Tracked', 8000, 20, 5000),
+    ('Light Wheeled', 2000, 8, 1000),
+    ('Infantry Squad', 500, 10, 0);
+
 CREATE TABLE components (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,

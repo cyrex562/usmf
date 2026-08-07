@@ -1,4 +1,13 @@
-import type { Component, CreateComponentRequest } from './types'
+import type {
+  Asset,
+  AssetValidation,
+  ChassisSpec,
+  Component,
+  CreateAssetRequest,
+  CreateChassisSpecRequest,
+  CreateComponentRequest,
+  ValidateAssetRequest,
+} from './types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
 
@@ -18,6 +27,24 @@ export const api = {
   getComponent: (id: number) => request<Component>(`/api/components/${id}`),
   createComponent: (body: CreateComponentRequest) =>
     request<{ id: number }>('/api/components', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listChassisSpecs: () => request<ChassisSpec[]>('/api/chassis-specs'),
+  createChassisSpec: (body: CreateChassisSpecRequest) =>
+    request<ChassisSpec>('/api/chassis-specs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listAssets: () => request<Asset[]>('/api/assets'),
+  getAsset: (id: number) => request<Asset>(`/api/assets/${id}`),
+  createAsset: (body: CreateAssetRequest) =>
+    request<{ id: number }>('/api/assets', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  validateAsset: (body: ValidateAssetRequest) =>
+    request<AssetValidation>('/api/assets/validate', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
