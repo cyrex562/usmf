@@ -45,7 +45,12 @@ pub fn find_path(
     let mut cost_so_far: HashMap<HexCoord, u32> = HashMap::new();
     cost_so_far.insert(start, 0);
 
-    while let Some(Frontier { cost, coord }) = open.pop() {
+    while let Some(Frontier { coord, .. }) = open.pop() {
+        // `Frontier.cost` is the heap-ordering f-score (g + heuristic); the true
+        // accumulated cost for pruning/accumulation must come from `cost_so_far`
+        // instead, or costs compound the heuristic on every hop.
+        let cost = cost_so_far[&coord];
+
         if coord == goal {
             return Some(reconstruct_path(&came_from, start, goal));
         }
@@ -81,6 +86,18 @@ pub fn find_path(
     }
 
     None
+}
+
+/// Total movement cost to walk `path` (as returned by `find_path`), excluding
+/// the starting hex -- used to debit a combatant's action-point pool for a Move
+/// action (see `engine::resolve_round`). A single-hex path (already at the
+/// destination) costs 0.
+pub fn path_cost(map: &Map, path: &[HexCoord]) -> u32 {
+    path.iter()
+        .skip(1)
+        .filter_map(|coord| map.cell_at(coord))
+        .map(|cell| cell.terrain.movement_cost())
+        .sum()
 }
 
 fn reconstruct_path(
@@ -140,10 +157,37 @@ mod tests {
     }
 
     #[test]
+    fn finds_path_that_exactly_exhausts_the_budget_over_multiple_hops() {
+        // Regression test: an earlier version pruned on the A* f-score (cost +
+        // heuristic) instead of the true accumulated cost, so this ended up
+        // compounding the heuristic on every hop and wrongly returned None even
+        // though the true cost to (5,0) is exactly 10.
+        let map = flat_map(10, 1);
+        let path = find_path(&map, HexCoord::new(0, 0), HexCoord::new(5, 0), 10).unwrap();
+        assert_eq!(*path.last().unwrap(), HexCoord::new(5, 0));
+        assert_eq!(path_cost(&map, &path), 10);
+    }
+
+    #[test]
     fn water_is_impassable() {
         let mut map = flat_map(3, 1);
         map.cells[1].terrain = TerrainType::Water; // between (0,0) and (2,0)
         let path = find_path(&map, HexCoord::new(0, 0), HexCoord::new(2, 0), 20);
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn path_cost_excludes_the_starting_hex() {
+        let map = flat_map(5, 5);
+        let path = find_path(&map, HexCoord::new(0, 0), HexCoord::new(2, 0), 10).unwrap();
+        // Plains costs 2/hex, two hexes traveled (not counting the start) = 4.
+        assert_eq!(path_cost(&map, &path), 4);
+    }
+
+    #[test]
+    fn path_cost_of_staying_put_is_zero() {
+        let map = flat_map(5, 5);
+        let path = find_path(&map, HexCoord::new(0, 0), HexCoord::new(0, 0), 10).unwrap();
+        assert_eq!(path_cost(&map, &path), 0);
     }
 }

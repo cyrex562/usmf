@@ -5,13 +5,13 @@ use rand_chacha::ChaCha8Rng;
 use usmf_core::{HexCoord, Map};
 
 use crate::los::has_line_of_sight;
-use crate::pathfinding::find_path;
+use crate::pathfinding::{find_path, path_cost};
 
 #[derive(Debug, Clone)]
-pub enum Order {
-    MoveTo(HexCoord),
+pub enum Action {
+    Move { to: HexCoord },
     Attack { target_unit_id: i64 },
-    Hold,
+    Pass,
 }
 
 #[derive(Debug, Clone)]
@@ -19,22 +19,34 @@ pub struct CombatantState {
     pub unit_id: i64,
     pub side: String,
     pub position: HexCoord,
-    pub movement_allowance: u32,
+    /// Composition-derived baseline from `usmf_core::base_initiative`; combined
+    /// with a fresh random draw each round to produce that round's activation
+    /// order (design_doc.md §3).
+    pub base_initiative: f64,
+    pub max_action_points: u32,
+    /// Reset to `max_action_points` at the start of every round, then spent as
+    /// this unit takes actions during its turn.
+    pub action_points: u32,
     pub weapon_range_hexes: u32,
     pub weapon_damage: f64,
+    pub attack_ap_cost: u32,
     pub hit_points: f64,
     pub destroyed: bool,
 }
 
 #[derive(Debug, Clone)]
-pub enum TurnEvent {
+pub enum RoundEvent {
+    InitiativeRolled {
+        order: Vec<i64>,
+    },
+    TurnStarted {
+        unit_id: i64,
+        action_points: u32,
+    },
     Moved {
         unit_id: i64,
         path: Vec<HexCoord>,
-    },
-    MoveBlocked {
-        unit_id: i64,
-        reason: String,
+        ap_spent: u32,
     },
     AttackResolved {
         attacker_unit_id: i64,
@@ -45,91 +57,109 @@ pub enum TurnEvent {
     UnitDestroyed {
         unit_id: i64,
     },
+    UnitPassed {
+        unit_id: i64,
+    },
+    ActionBlocked {
+        unit_id: i64,
+        reason: String,
+    },
 }
 
-/// Runs the movement + engagement phases for one turn. Propagation (morale/supply/C2)
-/// is deliberately not here yet — it operates over the `Unit` tree in `usmf-core`
-/// rather than over spatial `CombatantState`, and gets wired in once the API layer
-/// can supply both together.
-pub fn resolve_turn(
+/// This round's activation order: `base_initiative` plus a fresh random draw per
+/// combatant (in unit-id order, so the draw sequence -- and therefore the
+/// result -- is reproducible regardless of `HashMap` iteration order), highest
+/// effective initiative first. Ties break on unit_id ascending, also for
+/// reproducibility. Destroyed combatants are excluded. Recalculated fresh every
+/// round per design_doc.md §3, so casualties/suppression/morale shifts can
+/// reshuffle who acts when.
+pub fn roll_initiative(states: &HashMap<i64, CombatantState>, rng: &mut ChaCha8Rng) -> Vec<i64> {
+    let mut unit_ids: Vec<i64> = states
+        .values()
+        .filter(|s| !s.destroyed)
+        .map(|s| s.unit_id)
+        .collect();
+    unit_ids.sort_unstable();
+
+    let mut rolled: Vec<(i64, f64)> = unit_ids
+        .into_iter()
+        .map(|id| {
+            let roll: f64 = rng.gen_range(0.0..10.0);
+            (id, states[&id].base_initiative + roll)
+        })
+        .collect();
+
+    rolled.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    rolled.into_iter().map(|(id, _)| id).collect()
+}
+
+/// Runs one full round: resets every living combatant's action points, rolls
+/// this round's initiative order, then gives each living combatant its slice
+/// of time in that order. A unit with a queued `overrides` entry executes those
+/// actions in order (stopping early if AP runs out or an action doesn't apply);
+/// otherwise a simple default AI decides its actions -- engage the nearest
+/// enemy if in range and LOS, else advance toward the nearest enemy with
+/// whatever AP remains, else pass. This is deliberately simple ("hybrid"
+/// control per design_doc.md §3: AI by default, explicit player override per
+/// activation via `overrides`); a richer standing-orders/rules-of-engagement
+/// system is future work, not needed for this vertical slice.
+pub fn resolve_round(
     map: &Map,
     states: &mut HashMap<i64, CombatantState>,
-    orders: &HashMap<i64, Order>,
+    overrides: &HashMap<i64, Vec<Action>>,
     rng: &mut ChaCha8Rng,
-) -> Vec<TurnEvent> {
+) -> Vec<RoundEvent> {
     let mut events = Vec::new();
 
-    // Movement phase.
-    for (unit_id, order) in orders {
-        let Order::MoveTo(goal) = order else {
-            continue;
-        };
-        let Some(state) = states.get(unit_id) else {
+    for state in states.values_mut() {
+        if !state.destroyed {
+            state.action_points = state.max_action_points;
+        }
+    }
+
+    let order = roll_initiative(states, rng);
+    events.push(RoundEvent::InitiativeRolled {
+        order: order.clone(),
+    });
+
+    for unit_id in order {
+        let Some(state) = states.get(&unit_id) else {
             continue;
         };
         if state.destroyed {
             continue;
         }
-        match find_path(map, state.position, *goal, state.movement_allowance) {
-            Some(path) => {
-                if let Some(state) = states.get_mut(unit_id) {
-                    state.position = *goal;
-                }
-                events.push(TurnEvent::Moved {
-                    unit_id: *unit_id,
-                    path,
-                });
-            }
-            None => events.push(TurnEvent::MoveBlocked {
-                unit_id: *unit_id,
-                reason: "no reachable path within movement allowance".to_string(),
-            }),
-        }
-    }
-
-    // Engagement phase.
-    for (unit_id, order) in orders {
-        let Order::Attack { target_unit_id } = order else {
-            continue;
-        };
-        let Some(attacker) = states.get(unit_id).cloned() else {
-            continue;
-        };
-        let Some(target) = states.get(target_unit_id).cloned() else {
-            continue;
-        };
-        if attacker.destroyed || target.destroyed {
-            continue;
-        }
-
-        let range = attacker.position.distance(&target.position);
-        if range > attacker.weapon_range_hexes {
-            continue;
-        }
-        if !has_line_of_sight(map, attacker.position, target.position) {
-            continue;
-        }
-
-        // Simple to-hit: chance decreases linearly with range.
-        let hit_chance = 1.0 - (range as f64 / attacker.weapon_range_hexes.max(1) as f64) * 0.5;
-        let hit = rng.gen::<f64>() < hit_chance;
-        let damage = if hit { attacker.weapon_damage } else { 0.0 };
-
-        events.push(TurnEvent::AttackResolved {
-            attacker_unit_id: *unit_id,
-            target_unit_id: *target_unit_id,
-            hit,
-            damage,
+        events.push(RoundEvent::TurnStarted {
+            unit_id,
+            action_points: state.action_points,
         });
 
-        if hit {
-            if let Some(target_state) = states.get_mut(target_unit_id) {
-                target_state.hit_points -= damage;
-                if target_state.hit_points <= 0.0 && !target_state.destroyed {
-                    target_state.destroyed = true;
-                    events.push(TurnEvent::UnitDestroyed {
-                        unit_id: *target_unit_id,
-                    });
+        if let Some(queue) = overrides.get(&unit_id) {
+            for action in queue {
+                if states[&unit_id].destroyed {
+                    break;
+                }
+                let consumed = apply_action(map, states, unit_id, action.clone(), rng, &mut events);
+                if !consumed {
+                    break;
+                }
+            }
+        } else {
+            loop {
+                let state = &states[&unit_id];
+                if state.destroyed || state.action_points == 0 {
+                    break;
+                }
+                let action = decide_ai_action(unit_id, states, map);
+                let is_pass = matches!(action, Action::Pass);
+                let consumed = apply_action(map, states, unit_id, action, rng, &mut events);
+                if is_pass || !consumed {
+                    break;
                 }
             }
         }
@@ -138,10 +168,171 @@ pub fn resolve_turn(
     events
 }
 
+fn apply_action(
+    map: &Map,
+    states: &mut HashMap<i64, CombatantState>,
+    unit_id: i64,
+    action: Action,
+    rng: &mut ChaCha8Rng,
+    events: &mut Vec<RoundEvent>,
+) -> bool {
+    match action {
+        Action::Pass => {
+            events.push(RoundEvent::UnitPassed { unit_id });
+            false
+        }
+        Action::Move { to } => {
+            let (from, ap_available) = {
+                let state = &states[&unit_id];
+                (state.position, state.action_points)
+            };
+            match find_path(map, from, to, ap_available) {
+                Some(path) => {
+                    let cost = path_cost(map, &path);
+                    let state = states.get_mut(&unit_id).unwrap();
+                    state.position = to;
+                    state.action_points = state.action_points.saturating_sub(cost);
+                    events.push(RoundEvent::Moved {
+                        unit_id,
+                        path,
+                        ap_spent: cost,
+                    });
+                    true
+                }
+                None => {
+                    events.push(RoundEvent::ActionBlocked {
+                        unit_id,
+                        reason: "no reachable path within remaining action points".to_string(),
+                    });
+                    false
+                }
+            }
+        }
+        Action::Attack { target_unit_id } => {
+            let Some(attacker) = states.get(&unit_id).cloned() else {
+                return false;
+            };
+            if attacker.action_points < attacker.attack_ap_cost {
+                events.push(RoundEvent::ActionBlocked {
+                    unit_id,
+                    reason: "insufficient action points to attack".to_string(),
+                });
+                return false;
+            }
+            let Some(target) = states.get(&target_unit_id).cloned() else {
+                return false;
+            };
+            if attacker.destroyed || target.destroyed {
+                return false;
+            }
+
+            let range = attacker.position.distance(&target.position);
+            if range > attacker.weapon_range_hexes
+                || !has_line_of_sight(map, attacker.position, target.position)
+            {
+                events.push(RoundEvent::ActionBlocked {
+                    unit_id,
+                    reason: "target out of range or line of sight".to_string(),
+                });
+                return false;
+            }
+
+            let hit_chance = 1.0 - (range as f64 / attacker.weapon_range_hexes.max(1) as f64) * 0.5;
+            let hit = rng.gen::<f64>() < hit_chance;
+            let damage = if hit { attacker.weapon_damage } else { 0.0 };
+
+            if let Some(attacker_state) = states.get_mut(&unit_id) {
+                attacker_state.action_points = attacker_state
+                    .action_points
+                    .saturating_sub(attacker.attack_ap_cost);
+            }
+
+            events.push(RoundEvent::AttackResolved {
+                attacker_unit_id: unit_id,
+                target_unit_id,
+                hit,
+                damage,
+            });
+
+            if hit {
+                if let Some(target_state) = states.get_mut(&target_unit_id) {
+                    target_state.hit_points -= damage;
+                    if target_state.hit_points <= 0.0 && !target_state.destroyed {
+                        target_state.destroyed = true;
+                        events.push(RoundEvent::UnitDestroyed {
+                            unit_id: target_unit_id,
+                        });
+                    }
+                }
+            }
+
+            true
+        }
+    }
+}
+
+const GENEROUS_MOVE_CAP: u32 = 10_000;
+
+/// Default AI: attack the nearest enemy if it's in range and LOS; otherwise
+/// advance as far toward the nearest enemy as this turn's remaining AP allows;
+/// otherwise pass. See `resolve_round`'s doc comment for how this fits the
+/// hybrid AI/override control model.
+fn decide_ai_action(unit_id: i64, states: &HashMap<i64, CombatantState>, map: &Map) -> Action {
+    let me = &states[&unit_id];
+
+    let mut enemies: Vec<&CombatantState> = states
+        .values()
+        .filter(|s| !s.destroyed && s.side != me.side)
+        .collect();
+    enemies.sort_by_key(|e| (me.position.distance(&e.position), e.unit_id));
+
+    let Some(target) = enemies.first() else {
+        return Action::Pass;
+    };
+
+    let range = me.position.distance(&target.position);
+    if range <= me.weapon_range_hexes
+        && me.action_points >= me.attack_ap_cost
+        && has_line_of_sight(map, me.position, target.position)
+    {
+        return Action::Attack {
+            target_unit_id: target.unit_id,
+        };
+    }
+
+    if let Some(full_path) = find_path(map, me.position, target.position, GENEROUS_MOVE_CAP) {
+        let reachable = truncate_path_to_budget(map, &full_path, me.action_points);
+        if reachable.len() > 1 {
+            return Action::Move {
+                to: *reachable.last().unwrap(),
+            };
+        }
+    }
+
+    Action::Pass
+}
+
+fn truncate_path_to_budget(map: &Map, path: &[HexCoord], budget: u32) -> Vec<HexCoord> {
+    let mut truncated = vec![path[0]];
+    let mut spent = 0u32;
+    for coord in path.iter().skip(1) {
+        let Some(cell) = map.cell_at(coord) else {
+            break;
+        };
+        let cost = cell.terrain.movement_cost();
+        if spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        truncated.push(*coord);
+    }
+    truncated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::turn_rng;
+    use crate::rng::round_rng;
     use usmf_core::{HexCell, TerrainType};
 
     fn flat_map(width: u32, height: u32) -> Map {
@@ -164,113 +355,184 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unit_moves_along_valid_path() {
-        let map = flat_map(5, 5);
-        let mut states = HashMap::new();
-        states.insert(
-            1,
-            CombatantState {
-                unit_id: 1,
-                side: "blue".into(),
-                position: HexCoord::new(0, 0),
-                movement_allowance: 10,
-                weapon_range_hexes: 3,
-                weapon_damage: 10.0,
-                hit_points: 100.0,
-                destroyed: false,
-            },
-        );
-        let mut orders = HashMap::new();
-        orders.insert(1, Order::MoveTo(HexCoord::new(2, 0)));
-
-        let mut rng = turn_rng(1, 1);
-        let events = resolve_turn(&map, &mut states, &orders, &mut rng);
-
-        assert!(matches!(events[0], TurnEvent::Moved { unit_id: 1, .. }));
-        assert_eq!(states[&1].position, HexCoord::new(2, 0));
+    fn combatant(
+        unit_id: i64,
+        side: &str,
+        position: HexCoord,
+        base_initiative: f64,
+    ) -> CombatantState {
+        CombatantState {
+            unit_id,
+            side: side.to_string(),
+            position,
+            base_initiative,
+            max_action_points: 10,
+            action_points: 10,
+            weapon_range_hexes: 3,
+            weapon_damage: 50.0,
+            attack_ap_cost: 4,
+            hit_points: 100.0,
+            destroyed: false,
+        }
     }
 
     #[test]
-    fn attack_out_of_range_does_nothing() {
-        let map = flat_map(10, 1);
+    fn initiative_order_favors_higher_base_initiative() {
         let mut states = HashMap::new();
-        states.insert(
-            1,
-            CombatantState {
-                unit_id: 1,
-                side: "blue".into(),
-                position: HexCoord::new(0, 0),
-                movement_allowance: 0,
-                weapon_range_hexes: 2,
-                weapon_damage: 50.0,
-                hit_points: 100.0,
-                destroyed: false,
-            },
-        );
-        states.insert(
-            2,
-            CombatantState {
-                unit_id: 2,
-                side: "red".into(),
-                position: HexCoord::new(8, 0),
-                movement_allowance: 0,
-                weapon_range_hexes: 2,
-                weapon_damage: 50.0,
-                hit_points: 100.0,
-                destroyed: false,
-            },
-        );
-        let mut orders = HashMap::new();
-        orders.insert(1, Order::Attack { target_unit_id: 2 });
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 0.0));
+        states.insert(2, combatant(2, "blue", HexCoord::new(1, 0), 100.0));
+        let mut rng = round_rng(1, 1);
 
-        let mut rng = turn_rng(1, 1);
-        let events = resolve_turn(&map, &mut states, &orders, &mut rng);
-        assert!(events.is_empty());
-        assert_eq!(states[&2].hit_points, 100.0);
+        let order = roll_initiative(&states, &mut rng);
+        assert_eq!(order, vec![2, 1]);
     }
 
     #[test]
-    fn in_range_attack_can_destroy_target() {
+    fn initiative_is_recalculated_and_can_differ_round_to_round() {
+        let mut states = HashMap::new();
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 5.0));
+        states.insert(2, combatant(2, "blue", HexCoord::new(1, 0), 5.0));
+
+        let mut rng_round_1 = round_rng(99, 1);
+        let mut rng_round_2 = round_rng(99, 2);
+        let order_1 = roll_initiative(&states, &mut rng_round_1);
+        let order_2 = roll_initiative(&states, &mut rng_round_2);
+
+        // Same seed/round always reproduces the same order...
+        let mut rng_round_1_again = round_rng(99, 1);
+        assert_eq!(order_1, roll_initiative(&states, &mut rng_round_1_again));
+        // ...but different rounds are free to differ (equal base initiative here,
+        // so the random draw alone decides it).
+        assert_ne!(order_1, order_2);
+    }
+
+    #[test]
+    fn destroyed_combatants_are_excluded_from_initiative() {
+        let mut states = HashMap::new();
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 0.0));
+        let mut dead = combatant(2, "blue", HexCoord::new(1, 0), 100.0);
+        dead.destroyed = true;
+        states.insert(2, dead);
+
+        let mut rng = round_rng(1, 1);
+        assert_eq!(roll_initiative(&states, &mut rng), vec![1]);
+    }
+
+    #[test]
+    fn ai_attacks_when_target_in_range_and_los() {
         let map = flat_map(10, 1);
         let mut states = HashMap::new();
-        states.insert(
-            1,
-            CombatantState {
-                unit_id: 1,
-                side: "blue".into(),
-                position: HexCoord::new(0, 0),
-                movement_allowance: 0,
-                weapon_range_hexes: 5,
-                weapon_damage: 100.0,
-                hit_points: 100.0,
-                destroyed: false,
-            },
-        );
-        states.insert(
-            2,
-            CombatantState {
-                unit_id: 2,
-                side: "red".into(),
-                position: HexCoord::new(1, 0),
-                movement_allowance: 0,
-                weapon_range_hexes: 5,
-                weapon_damage: 100.0,
-                hit_points: 100.0,
-                destroyed: false,
-            },
-        );
-        let mut orders = HashMap::new();
-        orders.insert(1, Order::Attack { target_unit_id: 2 });
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
+        states.insert(2, combatant(2, "red", HexCoord::new(2, 0), 0.0));
 
-        // Adjacent hex + short range relative to max range => near-certain hit chance,
-        // seed chosen from a run that lands under the threshold.
-        let mut rng = turn_rng(7, 1);
-        let events = resolve_turn(&map, &mut states, &orders, &mut rng);
-        assert!(matches!(
-            events[0],
-            TurnEvent::AttackResolved { hit: true, .. }
-        ));
-        assert!(states[&2].destroyed);
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RoundEvent::AttackResolved {
+                attacker_unit_id: 1,
+                target_unit_id: 2,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn ai_advances_toward_distant_enemy_using_available_ap() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // Plains cost 2/hex; 10 AP affords 5 hexes of movement, well short of
+        // reaching (9,0) but the AI should still move as far as it can.
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
+        states.insert(2, combatant(2, "red", HexCoord::new(9, 0), 0.0));
+
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::Moved { unit_id: 1, .. })));
+        assert_ne!(states[&1].position, HexCoord::new(0, 0));
+        assert_eq!(states[&1].action_points, 0);
+    }
+
+    #[test]
+    fn unit_can_move_then_attack_in_the_same_turn_within_ap_budget() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // Move 1 hex (cost 2 on plains) then attack (cost 4) = 6 AP of the 10 available.
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
+        states.insert(2, combatant(2, "red", HexCoord::new(2, 0), 0.0));
+
+        let overrides = HashMap::from([(
+            1,
+            vec![
+                Action::Move {
+                    to: HexCoord::new(1, 0),
+                },
+                Action::Attack { target_unit_id: 2 },
+            ],
+        )]);
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &overrides, &mut rng);
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::Moved { unit_id: 1, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RoundEvent::AttackResolved {
+                attacker_unit_id: 1,
+                ..
+            }
+        )));
+        assert_eq!(states[&1].position, HexCoord::new(1, 0));
+        assert_eq!(states[&1].action_points, 4);
+    }
+
+    #[test]
+    fn override_action_is_used_instead_of_default_ai() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // In range/LOS -- default AI would attack -- but the override says pass.
+        // Unit 2 is also overridden to pass so its own (otherwise-legitimate)
+        // default-AI attack on unit 1 doesn't confound the assertion below.
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
+        states.insert(2, combatant(2, "red", HexCoord::new(2, 0), 0.0));
+
+        let overrides = HashMap::from([(1, vec![Action::Pass]), (2, vec![Action::Pass])]);
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &overrides, &mut rng);
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::UnitPassed { unit_id: 1 })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::AttackResolved { .. })));
+    }
+
+    #[test]
+    fn destroyed_mid_round_unit_is_skipped_when_its_turn_comes() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // Attacker goes first (high initiative) and one-shots the defender
+        // before the defender's own (lower-initiative) turn arrives.
+        states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
+        let mut defender = combatant(2, "red", HexCoord::new(1, 0), 0.0);
+        defender.hit_points = 10.0;
+        states.insert(2, defender);
+
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::UnitDestroyed { unit_id: 2 })));
+        // The dead unit never gets a TurnStarted of its own.
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::TurnStarted { unit_id: 2, .. })));
     }
 }

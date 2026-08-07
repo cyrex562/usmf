@@ -24,6 +24,7 @@ pub struct LoadoutTotals {
     pub cost: f64,
     pub power_gen: f64,
     pub power_draw: f64,
+    pub initiative: f64,
     pub capabilities: HashMap<String, i32>,
 }
 
@@ -63,6 +64,7 @@ pub fn validate_loadout(
         totals.cost += stats.cost * qty;
         totals.power_gen += stats.power_gen * qty;
         totals.power_draw += stats.power_draw * qty;
+        totals.initiative += stats.initiative * qty;
         for (tag, level) in &stats.capabilities {
             *totals.capabilities.entry(tag.clone()).or_insert(0) += level * item.quantity as i32;
         }

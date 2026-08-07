@@ -20,6 +20,6 @@ pub use personnel::{
 };
 pub use scenario::{Scenario, ScenarioForce, StartPosition};
 pub use unit::{
-    rollup_unit, FormationKind, PersonnelComposition, RelationshipRules, Unit, UnitAsset,
-    UnitPersonnelEntry, UnitRelationship, UnitRollup, UnitType,
+    base_initiative, rollup_unit, FormationKind, PersonnelComposition, RelationshipRules, Unit,
+    UnitAsset, UnitPersonnelEntry, UnitRelationship, UnitRollup, UnitType,
 };

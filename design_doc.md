@@ -41,12 +41,13 @@ reference for re-seeding the new schema by hand once the Rust `usmf-db` migratio
 **Component** — smallest building block (weapon, engine, sensor, armor plate, radio, ration pack).
 ```
 id, name, component_type (Weapon | Engine | Sensor | Armor | Comms | Logistics | ...)
-stats: { weight, space, cost, power_gen, power_draw, damage, range_hexes, rof, capabilities: {tag: level} }
+stats: { weight, space, cost, power_gen, power_draw, damage, range_hexes, rof, initiative, capabilities: {tag: level} }
 ```
 `stats` stays a flexible JSON blob (mirrors V2) because component types are heterogeneous — a fusion
 core and a ration pack don't share a schema. `capabilities` is a tag→level map (`"cyber": 2`,
 `"indirect_fire": 1`) that rolls up through Asset → Unit for the "This Brigade has: Level 4 Cyber"
-aggregation feature.
+aggregation feature. `initiative` is additive and feeds the simulation's activation order (§3.1) —
+purely a numeric contribution, not itself meaningful at design time.
 
 **Asset** — a physical platform or team, built from a chassis + slotted components.
 ```
@@ -165,39 +166,97 @@ UnitState: ... existing morale/supply/personnel/is_destroyed/is_hq_connected fie
   position (q, r), facing (optional), ammo_remaining, suppression_level, orders (current turn's order)
 ```
 
-## 3. Simulation design (turn-based hex tactical)
+## 3. Simulation design (initiative-order hex tactical)
 
-Each turn has four phases, run in this order, mirroring V2's `run_turn()` phase list but adding
-movement/engagement as spatial operations instead of abstract ones:
+**Terminology, since this replaced an earlier phase-based design:** a **round** is one full pass
+through the activation order — every living combatant gets exactly one turn per round. A **turn** is
+one combatant's slice of time within a round, during which it spends an action-point (AP) budget on
+one or more actions. This is not V2's WEGO phase model (all orders submitted, then Movement/
+Engagement/Propagation resolve simultaneously) — combatants act one at a time, in initiative order,
+against the *current* board state, so a fast unit can genuinely move and shoot before a slower enemy
+that hasn't acted yet even gets a chance to react.
 
-1. **Orders phase** — client submits per-unit orders for the turn (`MoveTo(q,r)`, `Attack(target_unit_id)`,
-   `Hold`). This is the only phase that takes client input; the rest is deterministic simulation.
-2. **Movement phase** — each unit with a `MoveTo` order pathfinds (A* over the hex grid, cost =
-   terrain `movement_cost`, blocked by impassable terrain and unit stacking limits) up to its
-   movement allowance (derived from Asset component stats, e.g. engine power/chassis type).
-3. **Engagement phase** — for each unit with an `Attack` order or an enemy in range: check
-   line-of-sight (hex line-trace, blocked by elevation/terrain), check range against the unit's
-   weapon components (`range_hexes` from Component stats), resolve to-hit and damage
-   (weapon `damage` stat, modified by target's cover bonus and suppression), apply casualties.
-   This is where V2's `_process_combat` random-casualty stub gets replaced with a real resolution
-   step — but the *output* (casualties → morale loss → propagate up tree) reuses V2's logic as-is.
-4. **Propagation phase** — largely unchanged from V2: morale shock propagates up the *effective*
-   command tree (a unit's current superior per section 2.1's `UnitRelationship`s, not necessarily its
-   organic parent — an OPCON'd unit's morale shock propagates to the gaining HQ it's actually
-   reporting to), supply drains and triggers morale penalties at zero, C2 severance drops a unit's
-   active command relationship to its destroyed superior (an attached/OPCON/TACON unit reverts to its
-   organic parent if that's still alive and connected; an organic unit whose HQ is destroyed goes
-   fully disconnected). This phase is spatially aware only in that "HQ destroyed" now also means "HQ's
-   hex was overrun," but the propagation math itself doesn't change.
+### 3.1 Initiative
 
-Determinism: combat resolution uses a seeded RNG (`ChaCha8Rng` seeded from the `SimulationRun` id +
-turn number) so a given scenario + order sequence always replays identically — needed for a usable
-event log and for any future "what changed" diffing between runs.
+Every combatant that carries its own composition (§2.2 — the units actually placed on the map) has a
+`base_initiative`: the max individual-item initiative total among its own directly-held assets/
+personnel (`usmf_core::base_initiative` — "fastest/most alert element sets the pace," not a sum).
+Initiative itself is a `Component` stat (§2.1) like `damage` or `range_hexes`, so it's designed the
+same way everything else is — a scout vehicle's sensor suite or a well-drilled soldier's kit can add
+to it.
 
-The client drives pacing: it can submit orders and call `step` turn-by-turn (like V2's
-`/api/simulations/{id}/step`), or request auto-play where the server steps on a timer and pushes
-state over WebSocket. Given orders happen once per turn per side, WebSocket push (not polling) is
-the natural fit for keeping the map view live during auto-play.
+At the start of **every round**, initiative is **recalculated**: each combatant's `base_initiative`
+plus a fresh seeded random draw produces that round's effective initiative, highest first (ties break
+on unit ID for reproducibility). Recalculating every round — rather than fixing the order once at
+battle start — means casualties, suppression, and morale shifts can reshuffle who acts when as the
+fight develops, not just who's fastest on paper.
+
+### 3.2 Control: AI by default, explicit override per activation
+
+When a combatant's turn comes up, **a simple default AI decides its actions** unless the controlling
+side has explicitly overridden that specific unit for this round:
+
+- **Default AI** (`usmf-sim::engine::decide_ai_action`): if an enemy is in weapon range and line of
+  sight, attack it; otherwise advance as far toward the nearest enemy as the remaining AP budget
+  allows; otherwise pass. This is deliberately simple — a heuristic, not a doctrine engine — and is
+  what gives every unit *some* sensible default behavior without the player having to hand-hold each
+  one every round.
+- **Override**: the controlling side can supply an explicit queued list of actions for a specific
+  unit's upcoming turn (`Move`, `Attack`, `Pass`, in order); when present, that queue runs instead of
+  the default AI, stopping early if AP runs out or an action doesn't apply. This is how a human player
+  takes direct control of one of their own units for a round without the engine needing to pause and
+  block mid-round waiting on input — overrides are submitted *before* the round resolves, alongside
+  (or instead of) letting AI handle everything else.
+
+This is intentionally the smallest version of "hybrid control" that works: no standing-orders/rules-
+of-engagement editor yet (see §8) — just "AI unless told otherwise for this unit, this round."
+
+### 3.3 Actions and the AP economy
+
+Each combatant gets an `action_points` budget (`max_action_points`, currently a flat per-combatant
+value — deriving it from component stats the way weapon range/damage already are is listed in §8) at
+the start of its turn, reset every round. Actions spend AP and a turn continues — "one or more
+actions" — until AP runs out, an action fails to apply, or the combatant explicitly passes:
+
+- **Move** — A* pathfind (`usmf-sim::pathfinding::find_path`) over the hex grid to the requested
+  hex, cost = sum of `TerrainType::movement_cost()` for each hex entered (impassable terrain simply
+  isn't reachable). Debits AP by the path's actual cost.
+- **Attack** — requires the target within the attacker's weapon `range_hexes` and line of sight
+  (`usmf-sim::los::has_line_of_sight`, elevation-aware hex line-trace); costs a fixed
+  `attack_ap_cost`. To-hit currently scales linearly with range (closer = more likely); cover/
+  suppression modifiers are not wired in yet (§8).
+- **Use ability** — not yet implemented; the `Action` enum has room to grow (abilities tied to a
+  unit's `capabilities` tags from §2.1, e.g. an "indirect_fire" capability unlocking an indirect-fire
+  action) once there's a concrete ability to build against.
+- **Pass** — ends the turn immediately, regardless of remaining AP.
+
+A hit that drops a target's hit points to zero destroys it immediately, mid-round — a unit destroyed
+early in the initiative order is simply skipped when its own (later) turn comes up, and every
+subsequent combatant's turn sees the updated board.
+
+### 3.4 End-of-round propagation
+
+After every living combatant has had its turn, an end-of-round pass runs the aggregate consequences —
+largely unchanged from V2's logic, just retargeted at the *effective* command tree (§2.1) instead of a
+flat parent_id tree: morale shock propagates up to a unit's current superior (which, for an OPCON'd
+unit, is the gaining HQ it's actually reporting to, not necessarily its organic parent), supply drains
+and triggers morale penalties at zero, and C2 severance drops a unit's active command relationship to
+a destroyed superior (an attached/OPCON/TACON unit reverts to its organic parent if that's still alive
+and connected; an organic unit whose HQ was destroyed goes fully disconnected).
+
+### 3.5 Determinism
+
+A round's `ChaCha8Rng` is seeded from the `SimulationRun` id and round number
+(`usmf-sim::rng::round_rng`) and used for both that round's initiative rolls and its to-hit checks, in
+a fixed order (unit IDs sorted before drawing) so the sequence — and therefore the whole round's
+outcome — is reproducible regardless of `HashMap` iteration order. Same scenario, same round number,
+same overrides in, same events out: needed for a usable replay/event log.
+
+### 3.6 Pacing
+
+The client drives pacing: submit this round's overrides (if any) and call `step` to resolve one round
+(like V2's `/api/simulations/{id}/step`, now resolving a round instead of a WEGO turn), or request
+auto-play where the server steps on a timer and pushes each round's events over WebSocket — see §5.
 
 ## 4. System architecture
 
@@ -286,8 +345,13 @@ REST:
 - `GET /api/simulations/:id`, `GET /api/simulations/:id/events`
 
 WebSocket:
-- `WS /api/simulations/:id/stream` — client sends `{ "orders": [...] }` or `{ "action": "step" | "play" | "pause" }`;
-  server pushes `{ "turn": n, "unit_states": [...], "events": [...] }` per turn.
+- `WS /api/simulations/:id/stream` — client sends
+  `{ "overrides": { "<unit_id>": [Action, ...] }, "action": "step" | "play" | "pause" }` (`overrides`
+  is optional and only needs entries for units the controlling side wants to hand-direct this round —
+  see §3.2; everything else resolves via the default AI); server pushes
+  `{ "round": n, "unit_states": [...], "events": [RoundEvent, ...] }` per round (`RoundEvent` per
+  §3 — `InitiativeRolled`, `TurnStarted`, `Moved`, `AttackResolved`, `UnitDestroyed`, `UnitPassed`,
+  `ActionBlocked`).
 
 ## 6. Repo layout after this change
 
@@ -313,12 +377,16 @@ tree, own-composition editor, and an attach/detach panel for non-organic `UnitRe
 functional parity with V2 plus the relationship model from section 2.1, real Rust logic instead of
 dummy stats.
 
-**Phase 3 — Map.** Map Editor (hex terrain painting), hex math + pathfinding + LOS in `usmf-sim`,
-unit-tested in isolation.
+**Phase 3 — Map.** Map Editor (hex terrain painting) and the `usmf-db`/`usmf-api` layer for Maps.
+Hex math, A* pathfinding, and LOS are already implemented and unit-tested in `usmf-sim` ahead of
+this phase (`usmf-sim::pathfinding`, `usmf-sim::los`) — this phase is mainly the persistence/UI
+around them.
 
-**Phase 4 — Scenario & Simulation.** Scenario Editor (force placement on a Map), turn engine wired
-end-to-end (orders → movement → engagement → propagation), Simulation Viewer with step/play and
-event log, WebSocket streaming.
+**Phase 4 — Scenario & Simulation.** Scenario Editor (force placement on a Map), the
+`usmf-db`/`usmf-api` layer for Scenarios/SimulationRuns, Simulation Viewer with step/play and event
+log, WebSocket streaming (§5). The initiative/AP round engine itself (§3) is already implemented and
+unit-tested in `usmf-sim::engine` ahead of this phase — this phase wires it to real persisted
+scenarios and a live UI instead of in-memory test fixtures.
 
 **Phase 5 — Polish.** Capability aggregation UI ("this Brigade has Level 4 Cyber"), replay/scrub
 through a completed run, chassis-type management UI (replacing the old hardcoded dict).
@@ -339,3 +407,17 @@ through a completed run, chassis-type management UI (replacing the old hardcoded
   Designer's attach/detach UI ships in Phase 2.
 - UI for editing `relationship_type_specs` itself (adding a custom relationship type beyond the
   seeded six) — deferred to whenever a real use case for a custom type shows up, per section 2.1.
+- `max_action_points`/`attack_ap_cost` (§3.3) are currently flat per-combatant values passed into
+  `CombatantState` directly, not derived from Component/Asset/PersonnelType stats the way weapon
+  range/damage/initiative already are. Wiring an `action_points` (or similar) Component stat through
+  the same loadout-totals mechanism is the natural next step once there's real Asset/PersonnelType
+  data to derive it from (Phase 2 issues).
+- The default AI (§3.2) is a one-line heuristic (attack if in range, else advance, else pass) with no
+  concept of standing orders, rules of engagement, or unit-specific doctrine. A richer
+  orders/behavior system (and the "commander sets objectives, AI executes them" framing from the
+  original ask) is real future work, not represented in the engine yet — the override mechanism
+  covers "player wants direct control of this unit this round" but not "player wants to steer AI
+  behavior without micromanaging every turn."
+- To-hit (§3.3) is still a simple range-scaled chance with no cover, suppression, or elevation
+  modifiers — the `TerrainType::cover_bonus()` value already exists on the Map model (§2.2) but isn't
+  read by combat resolution yet.

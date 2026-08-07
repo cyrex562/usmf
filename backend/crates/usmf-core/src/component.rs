@@ -29,6 +29,14 @@ pub struct ComponentStats {
     pub damage: f64,
     #[serde(default)]
     pub range_hexes: u32,
+    /// Contribution to whatever carries this component's baseline initiative
+    /// (see `usmf-sim`'s round loop) -- e.g. a lightweight recon sensor or a
+    /// well-drilled radio operator's kit might add a little, heavy armor might
+    /// be modeled as a negative delta. Purely additive; the unit's own
+    /// `base_initiative` takes the max across its own_assets/personnel, not a
+    /// sum, so one fast element doesn't get diluted by slower ones.
+    #[serde(default)]
+    pub initiative: f64,
     #[serde(default)]
     pub capabilities: HashMap<String, i32>,
 }

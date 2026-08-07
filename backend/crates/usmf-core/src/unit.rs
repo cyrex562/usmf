@@ -180,6 +180,37 @@ pub struct UnitRollup {
     pub span_of_control_warnings: Vec<String>,
 }
 
+/// Baseline initiative for `usmf-sim`'s round loop (design_doc.md §3): the max
+/// individual-item initiative total among this unit's own directly-held
+/// assets/personnel -- "fastest/most alert element sets the pace," not a sum.
+/// Deliberately *not* recursive: only units that carry their own composition
+/// occupy a hex and take an initiative slot (§2.2), so a HQ's aggregate
+/// subordinate tree is irrelevant here. Units with no composition of their own
+/// (pure command nodes) return 0.0 and simply never enter the initiative order.
+pub fn base_initiative(
+    unit: &Unit,
+    asset_totals: &HashMap<i64, AssetTotals>,
+    personnel_totals: &HashMap<i64, PersonnelTotals>,
+) -> f64 {
+    let mut contributions: Vec<f64> = unit
+        .own_assets
+        .iter()
+        .filter_map(|owned| asset_totals.get(&owned.asset_id))
+        .map(|totals| totals.initiative)
+        .collect();
+
+    if let PersonnelComposition::Detailed(entries) = &unit.personnel {
+        contributions.extend(
+            entries
+                .iter()
+                .filter_map(|entry| personnel_totals.get(&entry.personnel_type_id))
+                .map(|totals| totals.initiative),
+        );
+    }
+
+    contributions.into_iter().reduce(f64::max).unwrap_or(0.0)
+}
+
 /// Recursively rolls up a unit's own composition plus every subordinate reached
 /// through a `UnitRelationship` active at `as_of` and flagged
 /// `includes_in_span_of_control` (this is the "effective command tree" for that
@@ -347,6 +378,63 @@ mod tests {
             effective_until_turn: None,
             notes: None,
         }
+    }
+
+    #[test]
+    fn base_initiative_takes_max_not_sum_across_own_assets() {
+        let mut unit = leaf(1, 10);
+        unit.own_assets.push(UnitAsset {
+            asset_id: 11,
+            quantity: 1,
+        });
+        let mut asset_totals = HashMap::new();
+        asset_totals.insert(
+            10,
+            AssetTotals {
+                initiative: 3.0,
+                ..Default::default()
+            },
+        );
+        asset_totals.insert(
+            11,
+            AssetTotals {
+                initiative: 7.0,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(base_initiative(&unit, &asset_totals, &HashMap::new()), 7.0);
+    }
+
+    #[test]
+    fn base_initiative_considers_detailed_personnel_too() {
+        let mut unit = hq(1, None);
+        unit.personnel = PersonnelComposition::Detailed(vec![UnitPersonnelEntry {
+            personnel_type_id: 20,
+            quantity: 9,
+        }]);
+        let mut personnel_totals = HashMap::new();
+        personnel_totals.insert(
+            20,
+            PersonnelTotals {
+                initiative: 4.0,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            base_initiative(&unit, &HashMap::new(), &personnel_totals),
+            4.0
+        );
+    }
+
+    #[test]
+    fn base_initiative_defaults_to_zero_for_pure_command_node() {
+        let unit = hq(1, None);
+        assert_eq!(
+            base_initiative(&unit, &HashMap::new(), &HashMap::new()),
+            0.0
+        );
     }
 
     #[test]
