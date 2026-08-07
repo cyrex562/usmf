@@ -120,3 +120,50 @@ export type ValidatePersonnelTypeRequest = {
   base_cost?: number
   loadout: PersonnelLoadoutItem[]
 }
+
+export type UnitType = 'hq' | 'line' | 'support'
+export type FormationKind = 'standing' | 'task_force'
+
+export interface UnitAsset {
+  asset_id: number
+  quantity: number
+}
+
+export interface UnitPersonnelEntry {
+  personnel_type_id: number
+  quantity: number
+}
+
+// Mirrors usmf_core::unit::PersonnelComposition -- an internally-tagged enum
+// (tag = "mode") over struct variants.
+export type PersonnelComposition =
+  | { mode: 'simplified'; count: number }
+  | { mode: 'detailed'; entries: UnitPersonnelEntry[] }
+
+export interface Unit {
+  id: number
+  name: string
+  unit_type: UnitType
+  formation_kind: FormationKind
+  own_assets: UnitAsset[]
+  personnel: PersonnelComposition
+  c2_capacity: number | null
+}
+
+export type UpsertUnitRequest = {
+  name: string
+  unit_type: UnitType
+  formation_kind?: FormationKind
+  own_assets?: UnitAsset[]
+  personnel?: PersonnelComposition
+  c2_capacity?: number | null
+}
+
+export interface UnitRollup {
+  weight: number
+  cost: number
+  personnel_headcount: number
+  daily_supply_consumption: number
+  capabilities: Record<string, number>
+  span_of_control_warnings: string[]
+}

@@ -41,16 +41,22 @@ pub struct UnitPersonnelEntry {
 /// per-soldier detail isn't needed, or as a quantified list of `PersonnelType`s
 /// (`Detailed`) when it is — e.g. a rifle squad as "8x Rifleman, 1x Squad Leader,"
 /// each with its own loadout rolling up into the unit's weight/cost/capabilities.
+///
+/// Struct variants, not newtype variants (`Simplified { count }`, not
+/// `Simplified(u32)`): serde's internal tagging (`tag = "mode"`, needed so the
+/// JSON stays a flat, self-describing object) can only merge the tag into a
+/// map-shaped variant body -- a newtype wrapping a bare integer has nowhere to
+/// put it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum PersonnelComposition {
-    Simplified(u32),
-    Detailed(Vec<UnitPersonnelEntry>),
+    Simplified { count: u32 },
+    Detailed { entries: Vec<UnitPersonnelEntry> },
 }
 
 impl Default for PersonnelComposition {
     fn default() -> Self {
-        PersonnelComposition::Simplified(0)
+        PersonnelComposition::Simplified { count: 0 }
     }
 }
 
@@ -72,6 +78,7 @@ pub struct Unit {
     #[serde(default)]
     pub personnel: PersonnelComposition,
     /// Direct-command capacity for span-of-control warnings. `None` = unlimited.
+    #[serde(default)]
     pub c2_capacity: Option<u32>,
 }
 
@@ -199,7 +206,7 @@ pub fn base_initiative(
         .map(|totals| totals.initiative)
         .collect();
 
-    if let PersonnelComposition::Detailed(entries) = &unit.personnel {
+    if let PersonnelComposition::Detailed { entries } = &unit.personnel {
         contributions.extend(
             entries
                 .iter()
@@ -260,8 +267,8 @@ pub fn rollup_unit(
         }
 
         match &unit.personnel {
-            PersonnelComposition::Simplified(count) => rollup.personnel_headcount += count,
-            PersonnelComposition::Detailed(entries) => {
+            PersonnelComposition::Simplified { count } => rollup.personnel_headcount += count,
+            PersonnelComposition::Detailed { entries } => {
                 for entry in entries {
                     rollup.personnel_headcount += entry.quantity;
                     if let Some(totals) = personnel_totals.get(&entry.personnel_type_id) {
@@ -409,10 +416,12 @@ mod tests {
     #[test]
     fn base_initiative_considers_detailed_personnel_too() {
         let mut unit = hq(1, None);
-        unit.personnel = PersonnelComposition::Detailed(vec![UnitPersonnelEntry {
-            personnel_type_id: 20,
-            quantity: 9,
-        }]);
+        unit.personnel = PersonnelComposition::Detailed {
+            entries: vec![UnitPersonnelEntry {
+                personnel_type_id: 20,
+                quantity: 9,
+            }],
+        };
         let mut personnel_totals = HashMap::new();
         personnel_totals.insert(
             20,
@@ -435,6 +444,29 @@ mod tests {
             base_initiative(&unit, &HashMap::new(), &HashMap::new()),
             0.0
         );
+    }
+
+    #[test]
+    fn personnel_composition_round_trips_through_json() {
+        // Regression test: PersonnelComposition previously used newtype variants
+        // (`Simplified(u32)`) under `#[serde(tag = "mode")]` internal tagging,
+        // which serde_json cannot represent (a bare integer has nowhere to merge
+        // the tag) and panicked at serialization time. Struct variants fix it.
+        let simplified = PersonnelComposition::Simplified { count: 9 };
+        let json = serde_json::to_string(&simplified).unwrap();
+        assert_eq!(json, r#"{"mode":"simplified","count":9}"#);
+        let back: PersonnelComposition = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, PersonnelComposition::Simplified { count: 9 }));
+
+        let detailed = PersonnelComposition::Detailed {
+            entries: vec![UnitPersonnelEntry {
+                personnel_type_id: 1,
+                quantity: 5,
+            }],
+        };
+        let json = serde_json::to_string(&detailed).unwrap();
+        let back: PersonnelComposition = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, PersonnelComposition::Detailed { entries } if entries.len() == 1));
     }
 
     #[test]

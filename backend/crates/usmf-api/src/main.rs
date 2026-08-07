@@ -43,6 +43,15 @@ async fn main() -> anyhow::Result<()> {
             "/api/personnel-types/validate",
             post(routes::validate_personnel_type_draft),
         )
+        .route(
+            "/api/units",
+            get(routes::list_units).post(routes::create_unit),
+        )
+        .route(
+            "/api/units/{id}",
+            get(routes::get_unit).put(routes::update_unit),
+        )
+        .route("/api/units/{id}/rollup", get(routes::get_unit_rollup))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

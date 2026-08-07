@@ -1,13 +1,16 @@
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use usmf_core::{
-    validate_asset, validate_personnel_loadout, Asset, AssetComponent, ChassisSpec,
-    ComponentStats, ComponentType, PersonnelLoadoutItem, PersonnelType,
+    rollup_unit, validate_asset, validate_personnel_loadout, Asset, AssetComponent, ChassisSpec,
+    ComponentStats, ComponentType, FormationKind, PersonnelComposition, PersonnelLoadoutItem,
+    PersonnelType, Unit, UnitAsset, UnitType,
 };
-use usmf_db::{AssetRepo, ChassisSpecRepo, ComponentRepo, PersonnelTypeRepo};
+use usmf_db::{AssetRepo, ChassisSpecRepo, ComponentRepo, PersonnelTypeRepo, UnitRepo};
 
 use crate::state::AppState;
 
@@ -296,4 +299,169 @@ pub async fn validate_personnel_type_draft(
         loadout: body.loadout,
     };
     Json(validate_personnel_loadout(&draft, &components)).into_response()
+}
+
+pub async fn list_units(State(state): State<AppState>) -> impl IntoResponse {
+    let repo = UnitRepo::new(&state.pool);
+    match repo.list().await {
+        Ok(units) => Json(units).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list units");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn get_unit(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let repo = UnitRepo::new(&state.pool);
+    match repo.get(id).await {
+        Ok(Some(unit)) => Json(unit).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to fetch unit");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn default_formation_kind() -> FormationKind {
+    FormationKind::Standing
+}
+
+#[derive(Deserialize)]
+pub struct UpsertUnitRequest {
+    pub name: String,
+    pub unit_type: UnitType,
+    #[serde(default = "default_formation_kind")]
+    pub formation_kind: FormationKind,
+    #[serde(default)]
+    pub own_assets: Vec<UnitAsset>,
+    #[serde(default)]
+    pub personnel: PersonnelComposition,
+    #[serde(default)]
+    pub c2_capacity: Option<u32>,
+}
+
+impl UpsertUnitRequest {
+    fn into_unit(self, id: i64) -> Unit {
+        Unit {
+            id,
+            name: self.name,
+            unit_type: self.unit_type,
+            formation_kind: self.formation_kind,
+            own_assets: self.own_assets,
+            personnel: self.personnel,
+            c2_capacity: self.c2_capacity,
+        }
+    }
+}
+
+pub async fn create_unit(
+    State(state): State<AppState>,
+    Json(body): Json<UpsertUnitRequest>,
+) -> impl IntoResponse {
+    let repo = UnitRepo::new(&state.pool);
+    let unit = body.into_unit(0);
+    match repo.create(&unit).await {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to create unit");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn update_unit(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpsertUnitRequest>,
+) -> impl IntoResponse {
+    let repo = UnitRepo::new(&state.pool);
+    let unit = body.into_unit(id);
+    match repo.update(id, &unit).await {
+        Ok(true) => Json(serde_json::json!({ "id": id })).into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to update unit");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Rolls up just this unit's own composition (`own_assets`/`personnel`) --
+/// no relationships are wired in yet, so this doesn't walk an effective
+/// command tree (that's the Commander's Dashboard issue, once
+/// UnitRelationshipRepo exists). Useful today to preview a single unit's
+/// weight/cost/capabilities/span-of-control before it has any subordinates.
+pub async fn get_unit_rollup(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let unit_repo = UnitRepo::new(&state.pool);
+    let asset_repo = AssetRepo::new(&state.pool);
+    let chassis_repo = ChassisSpecRepo::new(&state.pool);
+    let personnel_repo = PersonnelTypeRepo::new(&state.pool);
+    let component_repo = ComponentRepo::new(&state.pool);
+
+    let unit = match unit_repo.get(id).await {
+        Ok(Some(unit)) => unit,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to fetch unit");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let components = match component_repo.list().await {
+        Ok(components) => components,
+        Err(err) => {
+            tracing::error!(%err, "failed to list components");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut asset_totals = HashMap::new();
+    for owned in &unit.own_assets {
+        if asset_totals.contains_key(&owned.asset_id) {
+            continue;
+        }
+        let asset = match asset_repo.get(owned.asset_id).await {
+            Ok(Some(asset)) => asset,
+            Ok(None) => continue,
+            Err(err) => {
+                tracing::error!(%err, "failed to fetch asset for rollup");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        let chassis = match chassis_repo.get(&asset.chassis_type).await {
+            Ok(chassis) => chassis,
+            Err(err) => {
+                tracing::error!(%err, "failed to fetch chassis spec for rollup");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        let validation = validate_asset(&asset, chassis.as_ref(), &components);
+        asset_totals.insert(owned.asset_id, validation.totals);
+    }
+
+    let mut personnel_totals = HashMap::new();
+    if let PersonnelComposition::Detailed { entries } = &unit.personnel {
+        for entry in entries {
+            if personnel_totals.contains_key(&entry.personnel_type_id) {
+                continue;
+            }
+            let personnel_type = match personnel_repo.get(entry.personnel_type_id).await {
+                Ok(Some(pt)) => pt,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::error!(%err, "failed to fetch personnel type for rollup");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            let validation = validate_personnel_loadout(&personnel_type, &components);
+            personnel_totals.insert(entry.personnel_type_id, validation.totals);
+        }
+    }
+
+    let rollup = rollup_unit(id, &[unit], &[], None, &asset_totals, &personnel_totals);
+    Json(rollup).into_response()
 }

@@ -11,6 +11,9 @@ import type {
   CreatePersonnelTypeRequest,
   PersonnelType,
   PersonnelValidation,
+  Unit,
+  UnitRollup,
+  UpsertUnitRequest,
   ValidateAssetRequest,
   ValidatePersonnelTypeRequest,
 } from '../api/types'
@@ -21,6 +24,7 @@ export const useDesignStore = defineStore('design', {
     chassisSpecs: [] as ChassisSpec[],
     assets: [] as Asset[],
     personnelTypes: [] as PersonnelType[],
+    units: [] as Unit[],
     loading: false,
     error: null as string | null,
   }),
@@ -90,6 +94,28 @@ export const useDesignStore = defineStore('design', {
     },
     validatePersonnelType(body: ValidatePersonnelTypeRequest): Promise<PersonnelValidation> {
       return api.validatePersonnelType(body)
+    },
+    async fetchUnits() {
+      this.loading = true
+      this.error = null
+      try {
+        this.units = await api.listUnits()
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : String(err)
+      } finally {
+        this.loading = false
+      }
+    },
+    async createUnit(body: UpsertUnitRequest) {
+      await api.createUnit(body)
+      await this.fetchUnits()
+    },
+    async updateUnit(id: number, body: UpsertUnitRequest) {
+      await api.updateUnit(id, body)
+      await this.fetchUnits()
+    },
+    getUnitRollup(id: number): Promise<UnitRollup> {
+      return api.getUnitRollup(id)
     },
   },
 })

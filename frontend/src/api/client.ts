@@ -9,6 +9,9 @@ import type {
   CreatePersonnelTypeRequest,
   PersonnelType,
   PersonnelValidation,
+  Unit,
+  UnitRollup,
+  UpsertUnitRequest,
   ValidateAssetRequest,
   ValidatePersonnelTypeRequest,
 } from './types'
@@ -64,4 +67,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  listUnits: () => request<Unit[]>('/api/units'),
+  getUnit: (id: number) => request<Unit>(`/api/units/${id}`),
+  createUnit: (body: UpsertUnitRequest) =>
+    request<{ id: number }>('/api/units', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateUnit: (id: number, body: UpsertUnitRequest) =>
+    request<{ id: number }>(`/api/units/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  getUnitRollup: (id: number) => request<UnitRollup>(`/api/units/${id}/rollup`),
 }
