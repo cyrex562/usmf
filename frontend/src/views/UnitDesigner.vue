@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { useDesignStore } from '../stores/design'
-import type { UnitAsset, UnitPersonnelEntry, UnitRollup, UnitType, UpsertUnitRequest } from '../api/types'
+import type {
+  FormationKind,
+  UnitAsset,
+  UnitPersonnelEntry,
+  UnitRollup,
+  UnitType,
+  UpsertUnitRequest,
+} from '../api/types'
 
 const store = useDesignStore()
 
@@ -12,6 +19,7 @@ const rollupLoading = ref(false)
 const draft = reactive({
   name: '',
   unit_type: 'line' as UnitType,
+  formation_kind: 'standing' as FormationKind,
   c2_capacity: null as number | null,
   own_assets: [] as UnitAsset[],
   personnelMode: 'simplified' as 'simplified' | 'detailed',
@@ -20,6 +28,7 @@ const draft = reactive({
 })
 
 const unitTypes: UnitType[] = ['hq', 'line', 'support']
+const formationKinds: FormationKind[] = ['standing', 'task_force']
 
 const newAsset = reactive({ asset_id: 0, quantity: 1 })
 const newPersonnel = reactive({ personnel_type_id: 0, quantity: 1 })
@@ -70,6 +79,7 @@ function resetDraft() {
   selectedId.value = null
   draft.name = ''
   draft.unit_type = 'line'
+  draft.formation_kind = 'standing'
   draft.c2_capacity = null
   draft.own_assets = []
   draft.personnelMode = 'simplified'
@@ -84,6 +94,7 @@ async function selectUnit(id: number) {
   selectedId.value = unit.id
   draft.name = unit.name
   draft.unit_type = unit.unit_type
+  draft.formation_kind = unit.formation_kind
   draft.c2_capacity = unit.c2_capacity
   draft.own_assets = unit.own_assets.map((a) => ({ ...a }))
   if (unit.personnel.mode === 'detailed') {
@@ -99,12 +110,16 @@ async function selectUnit(id: number) {
 }
 
 async function refreshRollup() {
-  if (selectedId.value === null) return
+  const id = selectedId.value
+  if (id === null) return
   rollupLoading.value = true
   try {
-    rollup.value = await store.getUnitRollup(selectedId.value)
+    const result = await store.getUnitRollup(id)
+    // Guard against a slower, earlier fetch resolving after the user has
+    // since selected a different unit.
+    if (selectedId.value === id) rollup.value = result
   } finally {
-    rollupLoading.value = false
+    if (selectedId.value === id) rollupLoading.value = false
   }
 }
 
@@ -112,6 +127,7 @@ function buildRequest(): UpsertUnitRequest {
   return {
     name: draft.name,
     unit_type: draft.unit_type,
+    formation_kind: draft.formation_kind,
     c2_capacity: draft.c2_capacity,
     own_assets: draft.own_assets,
     personnel:
@@ -175,6 +191,12 @@ onMounted(async () => {
           Unit type
           <select v-model="draft.unit_type">
             <option v-for="t in unitTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
+        </label>
+        <label>
+          Formation kind
+          <select v-model="draft.formation_kind">
+            <option v-for="f in formationKinds" :key="f" :value="f">{{ f }}</option>
           </select>
         </label>
         <label>
