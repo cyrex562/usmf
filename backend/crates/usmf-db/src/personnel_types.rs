@@ -142,7 +142,11 @@ mod tests {
         let personnel_repo = PersonnelTypeRepo::new(&pool);
 
         let rifle_id = component_repo
-            .create("M4 Carbine", ComponentType::Weapon, &ComponentStats::default())
+            .create(
+                "M4 Carbine",
+                ComponentType::Weapon,
+                &ComponentStats::default(),
+            )
             .await
             .unwrap();
 

@@ -8,5 +8,6 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "macros", "migrate", "json"] }
+thiserror.workspace = true
 tokio = { workspace = true, features = ["full"] }
 usmf-core.workspace = true

@@ -2,12 +2,14 @@ mod assets;
 mod chassis_specs;
 mod components;
 mod personnel_types;
+mod unit_relationships;
 mod units;
 
 pub use assets::AssetRepo;
 pub use chassis_specs::ChassisSpecRepo;
 pub use components::ComponentRepo;
 pub use personnel_types::PersonnelTypeRepo;
+pub use unit_relationships::{CreateRelationshipError, UnitRelationshipRepo};
 pub use units::UnitRepo;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

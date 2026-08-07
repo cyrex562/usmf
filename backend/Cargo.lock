@@ -1686,6 +1686,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror",
  "tokio",
  "usmf-core",
 ]

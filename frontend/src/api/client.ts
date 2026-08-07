@@ -7,9 +7,13 @@ import type {
   CreateChassisSpecRequest,
   CreateComponentRequest,
   CreatePersonnelTypeRequest,
+  CreateRelationshipRequest,
+  DetachRelationshipRequest,
   PersonnelType,
   PersonnelValidation,
+  RelationshipTypeSpec,
   Unit,
+  UnitRelationship,
   UnitRollup,
   UpsertUnitRequest,
   ValidateAssetRequest,
@@ -24,7 +28,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   if (!response.ok) {
-    throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${response.status}`)
+    // 4xx responses (e.g. a rejected cyclic relationship) carry a
+    // {"error": "..."} body with the actual reason -- surface it instead of
+    // just the status code, since that's what the UI shows the user.
+    const detail = await response
+      .clone()
+      .json()
+      .then((body) => (typeof body?.error === 'string' ? body.error : null))
+      .catch(() => null)
+    throw new Error(detail ?? `${init?.method ?? 'GET'} ${path} failed: ${response.status}`)
   }
   return (await response.json()) as T
 }
@@ -80,4 +92,18 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getUnitRollup: (id: number) => request<UnitRollup>(`/api/units/${id}/rollup`),
+  listRelationshipTypes: () => request<RelationshipTypeSpec[]>('/api/relationship-types'),
+  listRelationships: () => request<UnitRelationship[]>('/api/relationships'),
+  listRelationshipsForUnit: (id: number) =>
+    request<UnitRelationship[]>(`/api/units/${id}/relationships`),
+  createRelationship: (body: CreateRelationshipRequest) =>
+    request<{ id: number }>('/api/relationships', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  detachRelationship: (id: number, body: DetachRelationshipRequest) =>
+    request<{ id: number }>(`/api/relationships/${id}/detach`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 }

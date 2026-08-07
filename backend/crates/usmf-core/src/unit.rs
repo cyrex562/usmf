@@ -136,6 +136,16 @@ impl RelationshipRules {
     };
 }
 
+/// A named, storable `RelationshipRules` -- the domain shape of a row in the
+/// `relationship_type_specs` table (usmf-db). Exists so callers get a typed
+/// result from listing "what relationship types are configured" without
+/// usmf-core depending on usmf-db.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationshipTypeSpec {
+    pub name: String,
+    pub rules: RelationshipRules,
+}
+
 /// A typed, time-bounded command relationship between two units. The permanent
 /// TO&E tree is just every unit's `Organic` relationship to its parent formation;
 /// everything else (Attached, OPCON, TACON, Direct Support, General Support, or a
@@ -456,7 +466,10 @@ mod tests {
         let json = serde_json::to_string(&simplified).unwrap();
         assert_eq!(json, r#"{"mode":"simplified","count":9}"#);
         let back: PersonnelComposition = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, PersonnelComposition::Simplified { count: 9 }));
+        assert!(matches!(
+            back,
+            PersonnelComposition::Simplified { count: 9 }
+        ));
 
         let detailed = PersonnelComposition::Detailed {
             entries: vec![UnitPersonnelEntry {

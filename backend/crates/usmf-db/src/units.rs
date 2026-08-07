@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
 use sqlx::{FromRow, SqlitePool};
-use usmf_core::{FormationKind, PersonnelComposition, Unit, UnitAsset, UnitPersonnelEntry, UnitType};
+use usmf_core::{
+    FormationKind, PersonnelComposition, Unit, UnitAsset, UnitPersonnelEntry, UnitType,
+};
 
 fn unit_type_to_str(t: UnitType) -> &'static str {
     match t {
@@ -151,14 +153,12 @@ impl<'a> UnitRepo<'a> {
             .execute(self.pool)
             .await?;
         for owned in &unit.own_assets {
-            sqlx::query(
-                "INSERT INTO unit_assets (unit_id, asset_id, quantity) VALUES (?, ?, ?)",
-            )
-            .bind(unit_id)
-            .bind(owned.asset_id)
-            .bind(owned.quantity as i64)
-            .execute(self.pool)
-            .await?;
+            sqlx::query("INSERT INTO unit_assets (unit_id, asset_id, quantity) VALUES (?, ?, ?)")
+                .bind(unit_id)
+                .bind(owned.asset_id)
+                .bind(owned.quantity as i64)
+                .execute(self.pool)
+                .await?;
         }
 
         sqlx::query("DELETE FROM unit_personnel WHERE unit_id = ?")
@@ -265,7 +265,10 @@ mod tests {
         let asset_repo = AssetRepo::new(&pool);
         let unit_repo = UnitRepo::new(&pool);
 
-        let asset_id = asset_repo.create("Scout Car", "Light Wheeled", &[]).await.unwrap();
+        let asset_id = asset_repo
+            .create("Scout Car", "Light Wheeled", &[])
+            .await
+            .unwrap();
 
         let mut unit = simplified_unit("1st Recon Squad");
         unit.own_assets.push(UnitAsset {
@@ -324,7 +327,10 @@ mod tests {
         let asset_repo = AssetRepo::new(&pool);
         let unit_repo = UnitRepo::new(&pool);
 
-        let asset_id = asset_repo.create("Scout Car", "Light Wheeled", &[]).await.unwrap();
+        let asset_id = asset_repo
+            .create("Scout Car", "Light Wheeled", &[])
+            .await
+            .unwrap();
 
         let unit = simplified_unit("Recon Team");
         let id = unit_repo.create(&unit).await.unwrap();

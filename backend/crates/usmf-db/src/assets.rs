@@ -41,9 +41,10 @@ impl<'a> AssetRepo<'a> {
     }
 
     pub async fn list(&self) -> Result<Vec<Asset>> {
-        let rows: Vec<AssetRow> = sqlx::query_as("SELECT id, name, chassis_type FROM assets ORDER BY id")
-            .fetch_all(self.pool)
-            .await?;
+        let rows: Vec<AssetRow> =
+            sqlx::query_as("SELECT id, name, chassis_type FROM assets ORDER BY id")
+                .fetch_all(self.pool)
+                .await?;
         let mut assets = Vec::with_capacity(rows.len());
         for row in rows {
             let components = self.load_components(row.id).await?;
@@ -122,11 +123,19 @@ mod tests {
         let asset_repo = AssetRepo::new(&pool);
 
         let engine_id = component_repo
-            .create("Diesel Engine", ComponentType::Engine, &ComponentStats::default())
+            .create(
+                "Diesel Engine",
+                ComponentType::Engine,
+                &ComponentStats::default(),
+            )
             .await
             .unwrap();
         let gun_id = component_repo
-            .create("120mm Cannon", ComponentType::Weapon, &ComponentStats::default())
+            .create(
+                "120mm Cannon",
+                ComponentType::Weapon,
+                &ComponentStats::default(),
+            )
             .await
             .unwrap();
 

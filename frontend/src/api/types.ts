@@ -167,3 +167,38 @@ export interface UnitRollup {
   capabilities: Record<string, number>
   span_of_control_warnings: string[]
 }
+
+export interface RelationshipRules {
+  includes_in_span_of_control: boolean
+  sustainment_transfers: boolean
+  includes_in_combat_power_rollup: boolean
+}
+
+export interface RelationshipTypeSpec {
+  name: string
+  rules: RelationshipRules
+}
+
+export interface UnitRelationship {
+  id: number
+  superior_unit_id: number
+  subordinate_unit_id: number
+  relationship_type: string
+  rules: RelationshipRules
+  effective_from_turn: number | null
+  effective_until_turn: number | null
+  notes: string | null
+}
+
+export type CreateRelationshipRequest = {
+  superior_unit_id: number
+  subordinate_unit_id: number
+  relationship_type: string
+  effective_from_turn?: number | null
+  effective_until_turn?: number | null
+  notes?: string | null
+}
+
+export type DetachRelationshipRequest = {
+  effective_until_turn: number
+}

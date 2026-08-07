@@ -10,7 +10,10 @@ use usmf_core::{
     ComponentStats, ComponentType, FormationKind, PersonnelComposition, PersonnelLoadoutItem,
     PersonnelType, Unit, UnitAsset, UnitType,
 };
-use usmf_db::{AssetRepo, ChassisSpecRepo, ComponentRepo, PersonnelTypeRepo, UnitRepo};
+use usmf_db::{
+    AssetRepo, ChassisSpecRepo, ComponentRepo, CreateRelationshipError, PersonnelTypeRepo,
+    UnitRelationshipRepo, UnitRepo,
+};
 
 use crate::state::AppState;
 
@@ -464,4 +467,110 @@ pub async fn get_unit_rollup(
 
     let rollup = rollup_unit(id, &[unit], &[], None, &asset_totals, &personnel_totals);
     Json(rollup).into_response()
+}
+
+pub async fn list_relationship_types(State(state): State<AppState>) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    match repo.list_relationship_types().await {
+        Ok(types) => Json(types).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list relationship types");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn list_relationships_for_unit(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    match repo.list_for_unit(id).await {
+        Ok(relationships) => Json(relationships).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list relationships for unit");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn list_relationships(State(state): State<AppState>) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    match repo.list_all().await {
+        Ok(relationships) => Json(relationships).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list relationships");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateRelationshipRequest {
+    pub superior_unit_id: i64,
+    pub subordinate_unit_id: i64,
+    pub relationship_type: String,
+    #[serde(default)]
+    pub effective_from_turn: Option<i64>,
+    #[serde(default)]
+    pub effective_until_turn: Option<i64>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+pub async fn create_relationship(
+    State(state): State<AppState>,
+    Json(body): Json<CreateRelationshipRequest>,
+) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    match repo
+        .create(
+            body.superior_unit_id,
+            body.subordinate_unit_id,
+            &body.relationship_type,
+            body.effective_from_turn,
+            body.effective_until_turn,
+            body.notes.as_deref(),
+        )
+        .await
+    {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(
+            err @ (CreateRelationshipError::UnknownRelationshipType(_)
+            | CreateRelationshipError::UnknownUnit(_)
+            | CreateRelationshipError::WouldCreateCycle
+            | CreateRelationshipError::AlreadyHasOrganicSuperior(_)),
+        ) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(CreateRelationshipError::Db(err)) => {
+            tracing::error!(%err, "failed to create relationship");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DetachRelationshipRequest {
+    pub effective_until_turn: i64,
+}
+
+/// Ends a relationship (sets `effective_until_turn`) without deleting its row
+/// -- the history stays, per design_doc.md §2.1.
+pub async fn detach_relationship(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<DetachRelationshipRequest>,
+) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    match repo.end(id, body.effective_until_turn).await {
+        Ok(true) => Json(serde_json::json!({ "id": id })).into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to detach relationship");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

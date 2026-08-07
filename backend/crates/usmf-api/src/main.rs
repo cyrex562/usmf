@@ -52,6 +52,22 @@ async fn main() -> anyhow::Result<()> {
             get(routes::get_unit).put(routes::update_unit),
         )
         .route("/api/units/{id}/rollup", get(routes::get_unit_rollup))
+        .route(
+            "/api/units/{id}/relationships",
+            get(routes::list_relationships_for_unit),
+        )
+        .route(
+            "/api/relationships",
+            get(routes::list_relationships).post(routes::create_relationship),
+        )
+        .route(
+            "/api/relationships/{id}/detach",
+            post(routes::detach_relationship),
+        )
+        .route(
+            "/api/relationship-types",
+            get(routes::list_relationship_types),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state);
 

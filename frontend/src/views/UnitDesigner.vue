@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useDesignStore } from '../stores/design'
 import type {
   FormationKind,
   UnitAsset,
   UnitPersonnelEntry,
+  UnitRelationship,
   UnitRollup,
   UnitType,
   UpsertUnitRequest,
@@ -73,6 +74,96 @@ function removePersonnel(personnelTypeId: number) {
   draft.detailedEntries = draft.detailedEntries.filter(
     (e) => e.personnel_type_id !== personnelTypeId,
   )
+}
+
+function unitName(id: number): string {
+  return store.units.find((u) => u.id === id)?.name ?? `#${id}`
+}
+
+// Organic tree, built from the full relationship set (design-time preview
+// ignores from/until turn bounds, same as the backend's as_of: None -- there's
+// no live simulation clock yet to filter against). Roots are units that never
+// appear as an Organic subordinate, which naturally includes standalone units
+// with no relationships at all.
+const organicTree = computed(() => {
+  const organic = store.relationships.filter((r) => r.relationship_type === 'Organic')
+  const childrenOf = new Map<number, number[]>()
+  const hasOrganicSuperior = new Set<number>()
+  for (const r of organic) {
+    if (!childrenOf.has(r.superior_unit_id)) childrenOf.set(r.superior_unit_id, [])
+    childrenOf.get(r.superior_unit_id)!.push(r.subordinate_unit_id)
+    hasOrganicSuperior.add(r.subordinate_unit_id)
+  }
+
+  const nodes: { id: number; depth: number }[] = []
+  const visiting = new Set<number>()
+  function visit(id: number, depth: number) {
+    // Defensive: a data inconsistency shouldn't hang the UI in a loop.
+    if (visiting.has(id)) return
+    visiting.add(id)
+    nodes.push({ id, depth })
+    for (const childId of childrenOf.get(id) ?? []) visit(childId, depth + 1)
+    visiting.delete(id)
+  }
+  for (const unit of store.units) {
+    if (!hasOrganicSuperior.has(unit.id)) visit(unit.id, 0)
+  }
+  return nodes
+})
+
+const relationshipForm = reactive({
+  otherUnitId: 0,
+  direction: 'reports_to' as 'reports_to' | 'commands',
+  relationship_type: 'Organic',
+  effective_from_turn: null as number | null,
+  effective_until_turn: null as number | null,
+  notes: '',
+})
+const relationshipError = ref<string | null>(null)
+
+const selectedRelationships = computed(() => {
+  if (selectedId.value === null) return []
+  const id = selectedId.value
+  return store.relationships.filter(
+    (r) => r.superior_unit_id === id || r.subordinate_unit_id === id,
+  )
+})
+
+async function submitRelationship() {
+  if (selectedId.value === null || !relationshipForm.otherUnitId) return
+  relationshipError.value = null
+  const [superior_unit_id, subordinate_unit_id] =
+    relationshipForm.direction === 'commands'
+      ? [selectedId.value, relationshipForm.otherUnitId]
+      : [relationshipForm.otherUnitId, selectedId.value]
+
+  try {
+    await store.createRelationship({
+      superior_unit_id,
+      subordinate_unit_id,
+      relationship_type: relationshipForm.relationship_type,
+      effective_from_turn: relationshipForm.effective_from_turn,
+      effective_until_turn: relationshipForm.effective_until_turn,
+      notes: relationshipForm.notes || null,
+    })
+    relationshipForm.otherUnitId = 0
+    relationshipForm.notes = ''
+  } catch (err) {
+    relationshipError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function endRelationship(rel: UnitRelationship) {
+  const input = window.prompt('End this relationship at turn:', '0')
+  if (input === null) return
+  const turn = Number(input)
+  if (!Number.isFinite(turn)) return
+  relationshipError.value = null
+  try {
+    await store.detachRelationship(rel.id, { effective_until_turn: turn })
+  } catch (err) {
+    relationshipError.value = err instanceof Error ? err.message : String(err)
+  }
 }
 
 function resetDraft() {
@@ -155,6 +246,8 @@ onMounted(async () => {
     store.fetchAssets(),
     store.fetchPersonnelTypes(),
     store.fetchUnits(),
+    store.fetchRelationshipTypes(),
+    store.fetchRelationships(),
   ])
 })
 </script>
@@ -166,16 +259,18 @@ onMounted(async () => {
 
     <div class="layout">
       <div class="panel unit-list">
-        <h2>Units</h2>
+        <h2>Units (organic tree)</h2>
         <button type="button" @click="resetDraft">+ New unit</button>
         <ul>
           <li
-            v-for="u in store.units"
-            :key="u.id"
-            :class="{ active: u.id === selectedId }"
-            @click="selectUnit(u.id)"
+            v-for="node in organicTree"
+            :key="node.id"
+            :class="{ active: node.id === selectedId }"
+            :style="{ paddingLeft: `${0.3 + node.depth * 1.1}rem` }"
+            @click="selectUnit(node.id)"
           >
-            {{ u.name }} <span class="tag">{{ u.unit_type }}</span>
+            {{ unitName(node.id) }}
+            <span class="tag">{{ store.units.find((u) => u.id === node.id)?.unit_type }}</span>
           </li>
         </ul>
         <p v-if="!store.units.length && !store.loading">No units yet.</p>
@@ -285,6 +380,68 @@ onMounted(async () => {
         <p v-else-if="selectedId === null">Save this unit to see its rollup.</p>
       </div>
     </div>
+
+    <div class="panel relationships" v-if="selectedId !== null">
+      <h2>Command relationships — {{ unitName(selectedId) }}</h2>
+      <p v-if="relationshipError" class="error">{{ relationshipError }}</p>
+
+      <table v-if="selectedRelationships.length">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Superior</th>
+            <th>Subordinate</th>
+            <th>From → Until</th>
+            <th>Notes</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="rel in selectedRelationships" :key="rel.id">
+            <td>{{ rel.relationship_type }}</td>
+            <td>{{ unitName(rel.superior_unit_id) }}</td>
+            <td>{{ unitName(rel.subordinate_unit_id) }}</td>
+            <td>{{ rel.effective_from_turn ?? '—' }} → {{ rel.effective_until_turn ?? 'open' }}</td>
+            <td>{{ rel.notes ?? '—' }}</td>
+            <td><button type="button" @click="endRelationship(rel)">Detach</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else>No relationships yet for this unit.</p>
+
+      <h3>Add relationship</h3>
+      <div class="relationship-form">
+        <select v-model="relationshipForm.direction">
+          <option value="commands">{{ unitName(selectedId) }} commands…</option>
+          <option value="reports_to">{{ unitName(selectedId) }} reports to…</option>
+        </select>
+        <select v-model.number="relationshipForm.otherUnitId">
+          <option :value="0" disabled>Select a unit…</option>
+          <option v-for="u in store.units.filter((u) => u.id !== selectedId)" :key="u.id" :value="u.id">
+            {{ u.name }}
+          </option>
+        </select>
+        <select v-model="relationshipForm.relationship_type">
+          <option v-for="t in store.relationshipTypes" :key="t.name" :value="t.name">
+            {{ t.name }}
+          </option>
+        </select>
+        <input
+          v-model.number="relationshipForm.effective_from_turn"
+          type="number"
+          placeholder="From turn (optional)"
+        />
+        <input
+          v-model.number="relationshipForm.effective_until_turn"
+          type="number"
+          placeholder="Until turn (optional)"
+        />
+        <input v-model="relationshipForm.notes" placeholder="Notes (optional)" />
+        <button type="button" :disabled="!relationshipForm.otherUnitId" @click="submitRelationship">
+          Add
+        </button>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -382,5 +539,28 @@ onMounted(async () => {
 }
 .error {
   color: #ff6b6b;
+}
+.relationships {
+  margin-top: 1.5rem;
+}
+.relationships table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1rem;
+}
+.relationships th,
+.relationships td {
+  border: 1px solid #444;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+.relationship-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.relationship-form select,
+.relationship-form input {
+  padding: 0.4rem;
 }
 </style>

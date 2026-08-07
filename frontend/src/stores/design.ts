@@ -9,9 +9,13 @@ import type {
   CreateChassisSpecRequest,
   CreateComponentRequest,
   CreatePersonnelTypeRequest,
+  CreateRelationshipRequest,
+  DetachRelationshipRequest,
   PersonnelType,
   PersonnelValidation,
+  RelationshipTypeSpec,
   Unit,
+  UnitRelationship,
   UnitRollup,
   UpsertUnitRequest,
   ValidateAssetRequest,
@@ -25,6 +29,8 @@ export const useDesignStore = defineStore('design', {
     assets: [] as Asset[],
     personnelTypes: [] as PersonnelType[],
     units: [] as Unit[],
+    relationshipTypes: [] as RelationshipTypeSpec[],
+    relationships: [] as UnitRelationship[],
     loading: false,
     error: null as string | null,
   }),
@@ -116,6 +122,23 @@ export const useDesignStore = defineStore('design', {
     },
     getUnitRollup(id: number): Promise<UnitRollup> {
       return api.getUnitRollup(id)
+    },
+    async fetchRelationshipTypes() {
+      this.relationshipTypes = await api.listRelationshipTypes()
+    },
+    async fetchRelationships() {
+      this.relationships = await api.listRelationships()
+    },
+    // Deliberately doesn't swallow errors into store.error -- a rejected
+    // cyclic relationship needs to surface right next to the attach form,
+    // not just in the page-level error banner, so callers catch this directly.
+    async createRelationship(body: CreateRelationshipRequest) {
+      await api.createRelationship(body)
+      await this.fetchRelationships()
+    },
+    async detachRelationship(id: number, body: DetachRelationshipRequest) {
+      await api.detachRelationship(id, body)
+      await this.fetchRelationships()
     },
   },
 })
