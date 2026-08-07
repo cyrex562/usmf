@@ -1,10 +1,12 @@
 mod assets;
 mod chassis_specs;
 mod components;
+mod personnel_types;
 
 pub use assets::AssetRepo;
 pub use chassis_specs::ChassisSpecRepo;
 pub use components::ComponentRepo;
+pub use personnel_types::PersonnelTypeRepo;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;

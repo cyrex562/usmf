@@ -83,3 +83,40 @@ export type ValidateAssetRequest = {
   chassis_type: string
   components: AssetComponent[]
 }
+
+export interface PersonnelLoadoutItem {
+  component_id: number
+  quantity: number
+}
+
+// Structurally identical to AssetTotals/AssetValidation -- both are usmf-core's
+// shared LoadoutTotals/LoadoutValidation under the hood (see loadout.rs).
+export type PersonnelTotals = AssetTotals
+export type PersonnelValidation = AssetValidation
+
+export interface PersonnelType {
+  id: number
+  name: string
+  role_category: string | null
+  max_carry_weight: number
+  max_carry_space: number
+  base_cost: number
+  loadout: PersonnelLoadoutItem[]
+}
+
+export type CreatePersonnelTypeRequest = {
+  name: string
+  role_category?: string | null
+  max_carry_weight: number
+  max_carry_space: number
+  base_cost?: number
+  loadout: PersonnelLoadoutItem[]
+}
+
+export type ValidatePersonnelTypeRequest = {
+  role_category?: string | null
+  max_carry_weight: number
+  max_carry_space: number
+  base_cost?: number
+  loadout: PersonnelLoadoutItem[]
+}

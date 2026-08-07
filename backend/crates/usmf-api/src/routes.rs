@@ -3,8 +3,11 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
-use usmf_core::{validate_asset, Asset, AssetComponent, ChassisSpec, ComponentStats, ComponentType};
-use usmf_db::{AssetRepo, ChassisSpecRepo, ComponentRepo};
+use usmf_core::{
+    validate_asset, validate_personnel_loadout, Asset, AssetComponent, ChassisSpec,
+    ComponentStats, ComponentType, PersonnelLoadoutItem, PersonnelType,
+};
+use usmf_db::{AssetRepo, ChassisSpecRepo, ComponentRepo, PersonnelTypeRepo};
 
 use crate::state::AppState;
 
@@ -190,4 +193,107 @@ pub async fn validate_asset_draft(
         components: body.components,
     };
     Json(validate_asset(&draft, chassis.as_ref(), &components)).into_response()
+}
+
+pub async fn list_personnel_types(State(state): State<AppState>) -> impl IntoResponse {
+    let repo = PersonnelTypeRepo::new(&state.pool);
+    match repo.list().await {
+        Ok(personnel_types) => Json(personnel_types).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list personnel types");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn get_personnel_type(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = PersonnelTypeRepo::new(&state.pool);
+    match repo.get(id).await {
+        Ok(Some(personnel_type)) => Json(personnel_type).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to fetch personnel type");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreatePersonnelTypeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub role_category: Option<String>,
+    pub max_carry_weight: f64,
+    pub max_carry_space: f64,
+    #[serde(default)]
+    pub base_cost: f64,
+    #[serde(default)]
+    pub loadout: Vec<PersonnelLoadoutItem>,
+}
+
+pub async fn create_personnel_type(
+    State(state): State<AppState>,
+    Json(body): Json<CreatePersonnelTypeRequest>,
+) -> impl IntoResponse {
+    let repo = PersonnelTypeRepo::new(&state.pool);
+    match repo
+        .create(
+            &body.name,
+            body.role_category.as_deref(),
+            body.max_carry_weight,
+            body.max_carry_space,
+            body.base_cost,
+            &body.loadout,
+        )
+        .await
+    {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to create personnel type");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ValidatePersonnelTypeRequest {
+    #[serde(default)]
+    pub role_category: Option<String>,
+    pub max_carry_weight: f64,
+    pub max_carry_space: f64,
+    #[serde(default)]
+    pub base_cost: f64,
+    #[serde(default)]
+    pub loadout: Vec<PersonnelLoadoutItem>,
+}
+
+/// Validates a *draft* personnel type (carry capacity + loadout straight from
+/// the request body) without requiring it to be saved first -- same pattern as
+/// `validate_asset_draft`, for the Personnel Designer's live HUD.
+pub async fn validate_personnel_type_draft(
+    State(state): State<AppState>,
+    Json(body): Json<ValidatePersonnelTypeRequest>,
+) -> impl IntoResponse {
+    let component_repo = ComponentRepo::new(&state.pool);
+    let components = match component_repo.list().await {
+        Ok(components) => components,
+        Err(err) => {
+            tracing::error!(%err, "failed to list components");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let draft = PersonnelType {
+        id: 0,
+        name: String::new(),
+        role_category: body.role_category,
+        max_carry_weight: body.max_carry_weight,
+        max_carry_space: body.max_carry_space,
+        base_cost: body.base_cost,
+        loadout: body.loadout,
+    };
+    Json(validate_personnel_loadout(&draft, &components)).into_response()
 }

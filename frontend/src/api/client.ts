@@ -6,7 +6,11 @@ import type {
   CreateAssetRequest,
   CreateChassisSpecRequest,
   CreateComponentRequest,
+  CreatePersonnelTypeRequest,
+  PersonnelType,
+  PersonnelValidation,
   ValidateAssetRequest,
+  ValidatePersonnelTypeRequest,
 } from './types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
@@ -45,6 +49,18 @@ export const api = {
     }),
   validateAsset: (body: ValidateAssetRequest) =>
     request<AssetValidation>('/api/assets/validate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listPersonnelTypes: () => request<PersonnelType[]>('/api/personnel-types'),
+  getPersonnelType: (id: number) => request<PersonnelType>(`/api/personnel-types/${id}`),
+  createPersonnelType: (body: CreatePersonnelTypeRequest) =>
+    request<{ id: number }>('/api/personnel-types', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  validatePersonnelType: (body: ValidatePersonnelTypeRequest) =>
+    request<PersonnelValidation>('/api/personnel-types/validate', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

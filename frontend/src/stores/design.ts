@@ -8,7 +8,11 @@ import type {
   CreateAssetRequest,
   CreateChassisSpecRequest,
   CreateComponentRequest,
+  CreatePersonnelTypeRequest,
+  PersonnelType,
+  PersonnelValidation,
   ValidateAssetRequest,
+  ValidatePersonnelTypeRequest,
 } from '../api/types'
 
 export const useDesignStore = defineStore('design', {
@@ -16,6 +20,7 @@ export const useDesignStore = defineStore('design', {
     components: [] as Component[],
     chassisSpecs: [] as ChassisSpec[],
     assets: [] as Asset[],
+    personnelTypes: [] as PersonnelType[],
     loading: false,
     error: null as string | null,
   }),
@@ -67,6 +72,24 @@ export const useDesignStore = defineStore('design', {
     },
     validateAsset(body: ValidateAssetRequest): Promise<AssetValidation> {
       return api.validateAsset(body)
+    },
+    async fetchPersonnelTypes() {
+      this.loading = true
+      this.error = null
+      try {
+        this.personnelTypes = await api.listPersonnelTypes()
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : String(err)
+      } finally {
+        this.loading = false
+      }
+    },
+    async createPersonnelType(body: CreatePersonnelTypeRequest) {
+      await api.createPersonnelType(body)
+      await this.fetchPersonnelTypes()
+    },
+    validatePersonnelType(body: ValidatePersonnelTypeRequest): Promise<PersonnelValidation> {
+      return api.validatePersonnelType(body)
     },
   },
 })

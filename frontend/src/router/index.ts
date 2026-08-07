@@ -15,6 +15,11 @@ const router = createRouter({
       component: () => import('../views/AssetDesigner.vue'),
     },
     {
+      path: '/personnel',
+      name: 'personnel-designer',
+      component: () => import('../views/PersonnelDesigner.vue'),
+    },
+    {
       path: '/units',
       name: 'unit-designer',
       component: () => import('../views/UnitDesigner.vue'),
