@@ -57,16 +57,86 @@ Validation rule (unchanged from V2): `sum(component.weight * qty) <= chassis.max
 space; `power_draw <= power_gen`. Chassis specs move from a hardcoded Python dict into a DB table so
 new chassis types don't require a code change.
 
-**Unit** — an organizational node in a recursive TO&E tree.
+**PersonnelType** — an individually-modeled role/position (e.g. "Rifleman", "Squad Leader", "Combat
+Medic"). Structurally the same idea as an Asset — a capacity slotted with Components — except the
+capacity is a soldier's carry limit rather than a vehicle chassis envelope:
 ```
-id, name, unit_type (HQ | Line | Support | ...), parent_id (nullable, self-referential), asset_id (nullable)
-c2_capacity, c2_cost
+id, name, role_category (optional, e.g. "Infantry" | "Medical" | "Signal")
+max_carry_weight, max_carry_space, base_cost
+loadout: [(component_id, quantity)]   -- weapon, armor, radio, pack, ...
 ```
-Leaf units reference an Asset (or a personnel-only entry, e.g. a rifle squad with no vehicle).
-Internal nodes are pure organizational (a Battalion HQ has no Asset of its own). Computed,
-recursive properties (span of control, C2 load, logistics throughput vs. consumption, capability
-aggregation) are pure functions over the tree in `usmf-core` — same logic V2 had in
-`calculate_unit_stats`, but operating on real numbers instead of `# Dummy value`.
+Asset and PersonnelType both validate/total through the same shared logic (`usmf-core::loadout`) —
+"a capacity slotted with components" is the same problem whether the capacity belongs to a vehicle
+or a person.
+
+**Unit** — a node in the force structure. Composition and command are two separate concerns, not one
+`parent_id` column:
+```
+id, name, unit_type (HQ | Line | Support | ...), formation_kind (Standing | TaskForce)
+own_assets: [(asset_id, quantity)]
+personnel: Simplified(count) | Detailed([(personnel_type_id, quantity)])
+c2_capacity   -- direct-command capacity, for span-of-control warnings
+```
+A unit can hold multiple Assets directly (a "Tank Platoon" unit holds 4× "M1A5 Tank," no need for 4
+sibling nodes) and, independently, either a bare personnel headcount (`Simplified`) when detail
+isn't needed, or a quantified list of `PersonnelType`s (`Detailed`) when it is — e.g. a rifle squad
+as "8× Rifleman, 1× Squad Leader," each with its own loadout rolling up into the unit's weight/cost/
+capabilities. A unit can carry its own composition *and* have subordinates at the same time — a
+Company HQ typically has a small HQ section of its own (own_assets/personnel) while also commanding
+subordinate platoons (via relationships, below). `formation_kind` is informational: `Standing` units
+are permanent force structure, `TaskForce` units are stood up ad hoc for a mission (often around a
+borrowed HQ) — structurally both are ordinary units, so this is a reporting/UI tag, not a different
+code path.
+
+**UnitRelationship** — a typed, time-bounded command relationship between two units. This is the
+piece that replaces a single `parent_id`. Real TO&E isn't a strict tree: a battalion's *organic*
+subordinates are its companies, but battalions, companies, brigades, and divisions also routinely
+gain units from elsewhere — attached, OPCON, TACON, in direct or general support — for anywhere from
+one mission to an extended period, and a "task force" is nothing more than a unit (often an existing
+HQ) that has gained others this way. Modeling that as data instead of a hardcoded tree is the point:
+```
+id, superior_unit_id, subordinate_unit_id
+relationship_type: "Organic" | "Attached" | "OPCON" | "TACON" | "Direct Support" | "General Support" | <custom>
+rules: { includes_in_span_of_control, sustainment_transfers, includes_in_combat_power_rollup }
+effective_from_turn, effective_until_turn   -- both null = permanent (this is how "Organic" is expressed)
+notes
+```
+`relationship_type` is a free-form label for display; `rules` is what the rollup logic actually
+reads, and it's *data* — stored per label in a `relationship_type_specs` table (seeded with the
+doctrinal set below), not matched on in code. That's what makes "different kinds of rules about
+units and their relationships" configurable: adding a new relationship type (a custom support
+relationship, a project-specific attachment rule) is a data row, not a Rust change.
+
+| Relationship | In gaining unit's span of control? | Sustainment responsibility | In gaining unit's combat-power rollup? |
+|---|---|---|---|
+| Organic | Yes, permanently | Transfers (it's home) | Yes |
+| Attached | Yes | Transfers to gaining unit | Yes |
+| OPCON | Yes | Stays with organic parent | Yes |
+| TACON | Yes, scoped to the task | Stays with organic parent | Yes |
+| Direct Support | No — stays under its own chain | Stays with organic parent | No (support relationship, not command) |
+| General Support | No | Stays with organic parent | No |
+
+The **permanent TO&E tree** is just every unit's `Organic` relationship to its parent formation. The
+**effective command tree** at a given point in time is every relationship active at that time (see
+below) with `includes_in_span_of_control = true` — this is what span-of-control checks and the
+turn-engine's C2-severance logic (section 3) actually walk, not the permanent tree alone. A Task
+Force is simply a unit that has gained others via `Attached`/`OPCON`/`TACON` relationships for its
+mission window; no separate schema.
+
+Time-bounding uses `effective_from_turn`/`effective_until_turn` as an opaque ordinal (a turn number
+during a running simulation, or a designer-assigned sequence at design time) with `None` on both
+sides meaning "always in effect" — how a permanent Organic link is expressed. A rollup query can pass
+`as_of: None` to ignore time bounds entirely (a full "what's configured" view, useful at design
+time) or `as_of: Some(turn)` for the temporally accurate view during simulation.
+
+Computed, recursive properties (effective span of control, combat-power aggregation, capability
+aggregation, sustainment draw) are pure functions over units + relationships in `usmf-core`
+(`rollup_unit`) — same idea V2 had in `calculate_unit_stats`, but walking typed relationships instead
+of a `parent_id` column, and operating on real numbers instead of `# Dummy value`.
+
+Known simplification (revisit only if a future relationship type needs it): `rollup_unit` only
+traverses relationships flagged `includes_in_span_of_control`, so a hypothetical sustainment-only,
+no-command relationship wouldn't be picked up. None of the six doctrinal types above need that.
 
 ### 2.2 Simulation-time entities (the new part)
 
@@ -84,9 +154,10 @@ Scenario Editor is just painting hex properties.
 id, name, map_id, weather, duration_turns
 forces: [{ side_name, root_unit_id, start_positions: [(unit_id, q, r)], starting_morale, starting_supply }]
 ```
-`start_positions` only needs to name the *leaf* units (the actual fighting Assets/squads) — HQ and
-intermediate formation nodes don't occupy a hex themselves; their position for C2-range purposes is
-derived as the centroid (or nearest-subordinate) of their children, computed at simulation time.
+`start_positions` only needs to name units that carry their own composition (`own_assets`/
+`personnel` — the actual fighting elements) — pure command nodes with no composition of their own
+don't occupy a hex themselves; their position for C2-range purposes is derived as the centroid (or
+nearest-subordinate) of their effective subordinates, computed at simulation time.
 
 **SimulationRun / UnitState / SimulationEvent** — kept from V2, `UnitState` gains spatial fields:
 ```
@@ -110,10 +181,14 @@ movement/engagement as spatial operations instead of abstract ones:
    (weapon `damage` stat, modified by target's cover bonus and suppression), apply casualties.
    This is where V2's `_process_combat` random-casualty stub gets replaced with a real resolution
    step — but the *output* (casualties → morale loss → propagate up tree) reuses V2's logic as-is.
-4. **Propagation phase** — unchanged from V2: morale shock propagates to parent units (50% of
-   loss), supply drains and triggers morale penalties at zero, C2 severance detaches children when
-   their HQ is destroyed. This phase is spatially aware only in that "HQ destroyed" now also means
-   "HQ's hex was overrun," but the propagation math itself doesn't change.
+4. **Propagation phase** — largely unchanged from V2: morale shock propagates up the *effective*
+   command tree (a unit's current superior per section 2.1's `UnitRelationship`s, not necessarily its
+   organic parent — an OPCON'd unit's morale shock propagates to the gaining HQ it's actually
+   reporting to), supply drains and triggers morale penalties at zero, C2 severance drops a unit's
+   active command relationship to its destroyed superior (an attached/OPCON/TACON unit reverts to its
+   organic parent if that's still alive and connected; an organic unit whose HQ is destroyed goes
+   fully disconnected). This phase is spatially aware only in that "HQ destroyed" now also means "HQ's
+   hex was overrun," but the propagation math itself doesn't change.
 
 Determinism: combat resolution uses a seeded RNG (`ChaCha8Rng` seeded from the `SimulationRun` id +
 turn number) so a given scenario + order sequence always replays identically — needed for a usable
@@ -133,8 +208,9 @@ backend/
   Cargo.toml                 # workspace manifest
   crates/
     usmf-core/                # domain types + pure business logic, no I/O
-      Component, Asset, Unit, ChassisSpec, Map, Hex, Scenario, ...
-      asset validation, unit-tree aggregation (span of control, C2, logistics, capabilities)
+      Component, Asset, PersonnelType, Unit, UnitRelationship, ChassisSpec, Map, Hex, Scenario, ...
+      loadout validation (shared by Asset and PersonnelType), unit-tree rollup over typed
+      time-bounded relationships (effective span of control, combat power, sustainment, capabilities)
       all serde Serialize/Deserialize — this is the single source of truth for the wire format
     usmf-sim/                 # the simulation engine, depends on usmf-core only
       hex math (axial coords, distance, line-trace for LOS, A* pathfinding)
@@ -143,7 +219,8 @@ backend/
       fully unit-testable without a DB or web server
     usmf-db/                  # persistence, depends on usmf-core
       sqlx (SQLite), migrations/, repository structs per aggregate
-      (ComponentRepo, AssetRepo, UnitRepo, MapRepo, ScenarioRepo, SimulationRepo)
+      (ComponentRepo, AssetRepo, PersonnelTypeRepo, UnitRepo, UnitRelationshipRepo, MapRepo,
+      ScenarioRepo, SimulationRepo)
     usmf-api/                 # binary crate, axum HTTP+WS server
       depends on core+db+sim, thin controllers, no business logic of its own
 ```
@@ -199,7 +276,11 @@ Vue SPA  <--WebSocket (order submission, turn-state push)-->        Axum (usmf-a
 REST:
 - `GET/POST /api/components`, `GET/PUT/DELETE /api/components/:id`
 - `GET/POST /api/assets`, `POST /api/assets/:id/validate`
-- `GET/POST /api/units`, `PATCH /api/units/:id/move`, `GET /api/units/:id/stats`
+- `GET/POST /api/personnel-types`, `POST /api/personnel-types/:id/validate`
+- `GET/POST /api/units`, `GET /api/units/:id/rollup?as_of=<turn>`
+- `GET/POST /api/units/:id/relationships`, `DELETE /api/relationships/:id` (attach/detach, i.e. add
+  or end a `UnitRelationship`)
+- `GET/POST /api/relationship-types` (manage the `relationship_type_specs` rule table)
 - `GET/POST /api/maps`, `PUT /api/maps/:id/hexes`
 - `GET/POST /api/scenarios`, `POST /api/scenarios/:id/simulations` (start a run)
 - `GET /api/simulations/:id`, `GET /api/simulations/:id/events`
@@ -226,8 +307,11 @@ usmf/
 **Phase 1 — Foundation.** Rust workspace + Vue scaffold building and talking to each other
 (health-check round trip). SQLite schema + migrations for Component/Asset/Unit ported from V2.
 
-**Phase 2 — Design tools.** Component Library, Asset Designer (with live HUD validation), Unit
-Designer (drag-drop TO&E tree) — functional parity with V2, real Rust logic instead of dummy stats.
+**Phase 2 — Design tools.** Component Library, Asset Designer (with live HUD validation), Personnel
+Designer (same HUD pattern for `PersonnelType` loadouts), Unit Designer (drag-drop *organic* TO&E
+tree, own-composition editor, and an attach/detach panel for non-organic `UnitRelationship`s) —
+functional parity with V2 plus the relationship model from section 2.1, real Rust logic instead of
+dummy stats.
 
 **Phase 3 — Map.** Map Editor (hex terrain painting), hex math + pathfinding + LOS in `usmf-sim`,
 unit-tested in isolation.
@@ -248,3 +332,10 @@ through a completed run, chassis-type management UI (replacing the old hardcoded
 - Whether `usmf-sim`'s combat resolution should support pluggable rule sets (e.g. different damage
   models per era/genre) — the old spreadsheets in `old/` suggest this project has iterated through
   several rule systems before; worth a skim before Phase 4 locks in one resolution formula.
+- Cycle prevention for `Organic` relationships: nothing yet stops a unit from organically reporting
+  to its own descendant. Not a problem for the non-command relationship types (a unit can be
+  Attached/OPCON in a loop-free way even if graph cycles are technically representable), but the
+  permanent TO&E tree specifically needs to stay acyclic — needs a validation pass before the Unit
+  Designer's attach/detach UI ships in Phase 2.
+- UI for editing `relationship_type_specs` itself (adding a custom relationship type beyond the
+  seeded six) — deferred to whenever a real use case for a custom type shows up, per section 2.1.
