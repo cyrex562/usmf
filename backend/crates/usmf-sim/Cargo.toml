@@ -1,0 +1,9 @@
+[package]
+name = "usmf-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+usmf-core.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true

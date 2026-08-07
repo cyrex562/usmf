@@ -1,0 +1,18 @@
+[package]
+name = "usmf-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8.9"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["full"] }
+tower-http = { version = "0.7.0", features = ["cors"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+usmf-core.workspace = true
+usmf-db.workspace = true
+usmf-sim.workspace = true
