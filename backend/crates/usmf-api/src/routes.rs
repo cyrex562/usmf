@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use usmf_core::{
-    rollup_unit, validate_asset, validate_personnel_loadout, Asset, AssetComponent, ChassisSpec,
-    ComponentStats, ComponentType, FormationKind, PersonnelComposition, PersonnelLoadoutItem,
-    PersonnelType, Unit, UnitAsset, UnitType,
+    effective_subtree_unit_ids, rollup_unit, validate_asset, validate_personnel_loadout, Asset,
+    AssetComponent, ChassisSpec, ComponentStats, ComponentType, FormationKind,
+    PersonnelComposition, PersonnelLoadoutItem, PersonnelType, Unit, UnitAsset, UnitType,
 };
 use usmf_db::{
     AssetRepo, ChassisSpecRepo, ComponentRepo, CreateRelationshipError, PersonnelTypeRepo,
@@ -396,24 +396,66 @@ pub async fn update_unit(
 /// command tree (that's the Commander's Dashboard issue, once
 /// UnitRelationshipRepo exists). Useful today to preview a single unit's
 /// weight/cost/capabilities/span-of-control before it has any subordinates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupScope {
+    /// Effective command tree: every relationship active at `as_of` and
+    /// flagged `includes_in_span_of_control` (Organic, Attached, OPCON,
+    /// TACON) -- what a commander actually has under them right now.
+    #[default]
+    Effective,
+    /// Only the permanent Organic tree, ignoring any Attached/OPCON/TACON
+    /// task organization -- "what's on the books" regardless of current
+    /// attachments.
+    Organic,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RollupQuery {
+    pub as_of: Option<i64>,
+    #[serde(default)]
+    pub scope: RollupScope,
+}
+
+/// Rolls up a unit's own composition plus its effective (or, per `scope`,
+/// purely organic) command tree -- the "Commander's Dashboard": weight/cost/
+/// personnel/capabilities/span-of-control warnings/sustainment draw, per
+/// design_doc.md §2.1's `rollup_unit`.
 pub async fn get_unit_rollup(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(query): Query<RollupQuery>,
 ) -> impl IntoResponse {
     let unit_repo = UnitRepo::new(&state.pool);
+    let relationship_repo = UnitRelationshipRepo::new(&state.pool);
     let asset_repo = AssetRepo::new(&state.pool);
     let chassis_repo = ChassisSpecRepo::new(&state.pool);
     let personnel_repo = PersonnelTypeRepo::new(&state.pool);
     let component_repo = ComponentRepo::new(&state.pool);
 
-    let unit = match unit_repo.get(id).await {
-        Ok(Some(unit)) => unit,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+    // rollup_unit walks the tree by looking units/relationships up from these
+    // full lists, so it needs every unit (not just the root) to resolve
+    // subordinates' own composition.
+    let units = match unit_repo.list().await {
+        Ok(units) => units,
         Err(err) => {
-            tracing::error!(%err, "failed to fetch unit");
+            tracing::error!(%err, "failed to list units for rollup");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    if !units.iter().any(|u| u.id == id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut relationships = match relationship_repo.list_all().await {
+        Ok(relationships) => relationships,
+        Err(err) => {
+            tracing::error!(%err, "failed to list relationships for rollup");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if query.scope == RollupScope::Organic {
+        relationships.retain(|r| r.relationship_type == "Organic");
+    }
     let components = match component_repo.list().await {
         Ok(components) => components,
         Err(err) => {
@@ -422,32 +464,47 @@ pub async fn get_unit_rollup(
         }
     };
 
+    // Scope the totals-fetching loops below to only the units actually
+    // reachable from `id` through the same tree rollup_unit walks, not every
+    // unit in the system -- this app's whole purpose is building out large
+    // force structures, so "every unit" scales badly.
+    let subtree_ids = effective_subtree_unit_ids(id, &units, &relationships, query.as_of);
+    let subtree_units: Vec<&Unit> = units
+        .iter()
+        .filter(|u| subtree_ids.contains(&u.id))
+        .collect();
+
     let mut asset_totals = HashMap::new();
-    for owned in &unit.own_assets {
-        if asset_totals.contains_key(&owned.asset_id) {
-            continue;
+    for unit in &subtree_units {
+        for owned in &unit.own_assets {
+            if asset_totals.contains_key(&owned.asset_id) {
+                continue;
+            }
+            let asset = match asset_repo.get(owned.asset_id).await {
+                Ok(Some(asset)) => asset,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::error!(%err, "failed to fetch asset for rollup");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            let chassis = match chassis_repo.get(&asset.chassis_type).await {
+                Ok(chassis) => chassis,
+                Err(err) => {
+                    tracing::error!(%err, "failed to fetch chassis spec for rollup");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            let validation = validate_asset(&asset, chassis.as_ref(), &components);
+            asset_totals.insert(owned.asset_id, validation.totals);
         }
-        let asset = match asset_repo.get(owned.asset_id).await {
-            Ok(Some(asset)) => asset,
-            Ok(None) => continue,
-            Err(err) => {
-                tracing::error!(%err, "failed to fetch asset for rollup");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-        let chassis = match chassis_repo.get(&asset.chassis_type).await {
-            Ok(chassis) => chassis,
-            Err(err) => {
-                tracing::error!(%err, "failed to fetch chassis spec for rollup");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-        let validation = validate_asset(&asset, chassis.as_ref(), &components);
-        asset_totals.insert(owned.asset_id, validation.totals);
     }
 
     let mut personnel_totals = HashMap::new();
-    if let PersonnelComposition::Detailed { entries } = &unit.personnel {
+    for unit in &subtree_units {
+        let PersonnelComposition::Detailed { entries } = &unit.personnel else {
+            continue;
+        };
         for entry in entries {
             if personnel_totals.contains_key(&entry.personnel_type_id) {
                 continue;
@@ -465,7 +522,14 @@ pub async fn get_unit_rollup(
         }
     }
 
-    let rollup = rollup_unit(id, &[unit], &[], None, &asset_totals, &personnel_totals);
+    let rollup = rollup_unit(
+        id,
+        &units,
+        &relationships,
+        query.as_of,
+        &asset_totals,
+        &personnel_totals,
+    );
     Json(rollup).into_response()
 }
 

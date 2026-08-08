@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useDesignStore } from '../stores/design'
 import type {
   FormationKind,
+  RollupScope,
   UnitAsset,
   UnitPersonnelEntry,
   UnitRelationship,
@@ -16,6 +17,9 @@ const store = useDesignStore()
 const selectedId = ref<number | null>(null)
 const rollup = ref<UnitRollup | null>(null)
 const rollupLoading = ref(false)
+const rollupScope = ref<RollupScope>('effective')
+
+watch(rollupScope, () => refreshRollup())
 
 const draft = reactive({
   name: '',
@@ -202,15 +206,16 @@ async function selectUnit(id: number) {
 
 async function refreshRollup() {
   const id = selectedId.value
+  const scope = rollupScope.value
   if (id === null) return
   rollupLoading.value = true
   try {
-    const result = await store.getUnitRollup(id)
+    const result = await store.getUnitRollup(id, { scope })
     // Guard against a slower, earlier fetch resolving after the user has
-    // since selected a different unit.
-    if (selectedId.value === id) rollup.value = result
+    // since selected a different unit or toggled scope again.
+    if (selectedId.value === id && rollupScope.value === scope) rollup.value = result
   } finally {
-    if (selectedId.value === id) rollupLoading.value = false
+    if (selectedId.value === id && rollupScope.value === scope) rollupLoading.value = false
   }
 }
 
@@ -356,7 +361,17 @@ onMounted(async () => {
       </div>
 
       <div class="panel hud">
-        <h2>Rollup</h2>
+        <h2>Commander's Dashboard</h2>
+        <div class="scope-toggle" v-if="selectedId !== null">
+          <label class="radio">
+            <input type="radio" value="effective" v-model="rollupScope" />
+            Effective command tree
+          </label>
+          <label class="radio">
+            <input type="radio" value="organic" v-model="rollupScope" />
+            Organic tree only
+          </label>
+        </div>
         <template v-if="rollup">
           <dl>
             <dt>Weight</dt>
@@ -524,6 +539,12 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   padding: 0.2rem 0;
+}
+.scope-toggle {
+  margin-bottom: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 .hud dl {
   display: grid;

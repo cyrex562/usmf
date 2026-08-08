@@ -168,6 +168,15 @@ export interface UnitRollup {
   span_of_control_warnings: string[]
 }
 
+// 'effective' = the effective command tree (Organic + Attached/OPCON/TACON);
+// 'organic' = the permanent TO&E tree only, ignoring current attachments.
+export type RollupScope = 'effective' | 'organic'
+
+export type RollupQuery = {
+  as_of?: number
+  scope?: RollupScope
+}
+
 export interface RelationshipRules {
   includes_in_span_of_control: boolean
   sustainment_transfers: boolean

@@ -12,6 +12,7 @@ import type {
   PersonnelType,
   PersonnelValidation,
   RelationshipTypeSpec,
+  RollupQuery,
   Unit,
   UnitRelationship,
   UnitRollup,
@@ -91,7 +92,13 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
-  getUnitRollup: (id: number) => request<UnitRollup>(`/api/units/${id}/rollup`),
+  getUnitRollup: (id: number, query: RollupQuery = {}) => {
+    const params = new URLSearchParams()
+    if (query.as_of !== undefined) params.set('as_of', String(query.as_of))
+    if (query.scope !== undefined) params.set('scope', query.scope)
+    const qs = params.toString()
+    return request<UnitRollup>(`/api/units/${id}/rollup${qs ? `?${qs}` : ''}`)
+  },
   listRelationshipTypes: () => request<RelationshipTypeSpec[]>('/api/relationship-types'),
   listRelationships: () => request<UnitRelationship[]>('/api/relationships'),
   listRelationshipsForUnit: (id: number) =>

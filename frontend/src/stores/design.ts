@@ -14,6 +14,7 @@ import type {
   PersonnelType,
   PersonnelValidation,
   RelationshipTypeSpec,
+  RollupQuery,
   Unit,
   UnitRelationship,
   UnitRollup,
@@ -120,8 +121,8 @@ export const useDesignStore = defineStore('design', {
       await api.updateUnit(id, body)
       await this.fetchUnits()
     },
-    getUnitRollup(id: number): Promise<UnitRollup> {
-      return api.getUnitRollup(id)
+    getUnitRollup(id: number, query: RollupQuery = {}): Promise<UnitRollup> {
+      return api.getUnitRollup(id, query)
     },
     async fetchRelationshipTypes() {
       this.relationshipTypes = await api.listRelationshipTypes()

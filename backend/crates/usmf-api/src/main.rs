@@ -1,11 +1,3 @@
-mod routes;
-mod state;
-
-use axum::routing::{get, post};
-use axum::Router;
-use state::AppState;
-use tower_http::cors::CorsLayer;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -15,61 +7,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = usmf_db::connect(&database_url).await?;
     usmf_db::run_migrations(&pool).await?;
 
-    let state = AppState { pool };
-
-    let app = Router::new()
-        .route("/health", get(routes::health))
-        .route(
-            "/api/components",
-            get(routes::list_components).post(routes::create_component),
-        )
-        .route("/api/components/{id}", get(routes::get_component))
-        .route(
-            "/api/chassis-specs",
-            get(routes::list_chassis_specs).post(routes::create_chassis_spec),
-        )
-        .route(
-            "/api/assets",
-            get(routes::list_assets).post(routes::create_asset),
-        )
-        .route("/api/assets/{id}", get(routes::get_asset))
-        .route("/api/assets/validate", post(routes::validate_asset_draft))
-        .route(
-            "/api/personnel-types",
-            get(routes::list_personnel_types).post(routes::create_personnel_type),
-        )
-        .route("/api/personnel-types/{id}", get(routes::get_personnel_type))
-        .route(
-            "/api/personnel-types/validate",
-            post(routes::validate_personnel_type_draft),
-        )
-        .route(
-            "/api/units",
-            get(routes::list_units).post(routes::create_unit),
-        )
-        .route(
-            "/api/units/{id}",
-            get(routes::get_unit).put(routes::update_unit),
-        )
-        .route("/api/units/{id}/rollup", get(routes::get_unit_rollup))
-        .route(
-            "/api/units/{id}/relationships",
-            get(routes::list_relationships_for_unit),
-        )
-        .route(
-            "/api/relationships",
-            get(routes::list_relationships).post(routes::create_relationship),
-        )
-        .route(
-            "/api/relationships/{id}/detach",
-            post(routes::detach_relationship),
-        )
-        .route(
-            "/api/relationship-types",
-            get(routes::list_relationship_types),
-        )
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    let app = usmf_api::app(pool);
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

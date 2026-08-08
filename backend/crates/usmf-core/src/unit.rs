@@ -353,6 +353,36 @@ pub fn rollup_unit(
     )
 }
 
+/// Returns the IDs of `root_id` and every unit reachable from it through the
+/// same effective-command-tree traversal `rollup_unit` performs (relationships
+/// active at `as_of` and flagged `includes_in_span_of_control`). Lets callers
+/// (the API's rollup handler) scope per-unit lookups -- asset/personnel totals,
+/// etc. -- to only the units that actually feed into a given rollup, instead of
+/// every unit in the system.
+pub fn effective_subtree_unit_ids(
+    root_id: i64,
+    units: &[Unit],
+    relationships: &[UnitRelationship],
+    as_of: Option<i64>,
+) -> std::collections::HashSet<i64> {
+    let known_ids: std::collections::HashSet<i64> = units.iter().map(|u| u.id).collect();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![root_id];
+
+    while let Some(id) = stack.pop() {
+        if !known_ids.contains(&id) || !visited.insert(id) {
+            continue;
+        }
+        for rel in relationships.iter().filter(|r| {
+            r.superior_unit_id == id && r.rules.includes_in_span_of_control && r.is_active_at(as_of)
+        }) {
+            stack.push(rel.subordinate_unit_id);
+        }
+    }
+
+    visited
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,5 +721,69 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(rollup.weight, 2500.0);
+    }
+
+    #[test]
+    fn effective_subtree_unit_ids_includes_root_and_reachable_units_only() {
+        // 1 -Organic-> 2 -OPCON-> 3, plus an unrelated unit 4 that shouldn't appear.
+        let units = vec![hq(1, None), leaf(2, 10), leaf(3, 10), leaf(4, 10)];
+        let relationships = vec![
+            organic(1, 1, 2),
+            UnitRelationship {
+                id: 2,
+                superior_unit_id: 2,
+                subordinate_unit_id: 3,
+                relationship_type: "OPCON".into(),
+                rules: RelationshipRules::OPCON,
+                effective_from_turn: None,
+                effective_until_turn: None,
+                notes: None,
+            },
+        ];
+
+        let ids = effective_subtree_unit_ids(1, &units, &relationships, None);
+        assert_eq!(ids, [1, 2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn effective_subtree_unit_ids_excludes_relationships_outside_span_of_control() {
+        let units = vec![hq(1, None), leaf(2, 10)];
+        let relationships = vec![UnitRelationship {
+            id: 1,
+            superior_unit_id: 1,
+            subordinate_unit_id: 2,
+            relationship_type: "Direct Support".into(),
+            rules: RelationshipRules::DIRECT_SUPPORT,
+            effective_from_turn: None,
+            effective_until_turn: None,
+            notes: None,
+        }];
+
+        let ids = effective_subtree_unit_ids(1, &units, &relationships, None);
+        assert_eq!(ids, [1].into_iter().collect());
+    }
+
+    #[test]
+    fn effective_subtree_unit_ids_respects_as_of_window() {
+        let units = vec![hq(1, None), leaf(2, 10)];
+        let relationships = vec![UnitRelationship {
+            id: 1,
+            superior_unit_id: 1,
+            subordinate_unit_id: 2,
+            relationship_type: "Attached".into(),
+            rules: RelationshipRules::ATTACHED,
+            effective_from_turn: Some(5),
+            effective_until_turn: Some(10),
+            notes: None,
+        }];
+
+        assert_eq!(
+            effective_subtree_unit_ids(1, &units, &relationships, Some(3)),
+            [1].into_iter().collect()
+        );
+        assert_eq!(
+            effective_subtree_unit_ids(1, &units, &relationships, Some(7)),
+            [1, 2].into_iter().collect()
+        );
     }
 }
