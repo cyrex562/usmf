@@ -1,0 +1,31 @@
+[package]
+name = "usmf-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8.9"
+mime_guess = { version = "2.0.5", optional = true }
+rust-embed = { version = "8.12.0", optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["full"] }
+tower-http = { version = "0.7.0", features = ["cors"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+usmf-core.workspace = true
+usmf-db.workspace = true
+usmf-sim.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1.4"
+tower = { version = "0.5.3", features = ["util"] }
+
+[features]
+# Off by default: `cargo run -p usmf-api` stays API-only, paired with
+# `npm run dev` on :5173 like today. Release builds run `npm run build` in
+# frontend/ first (so frontend/dist exists), then build with this feature to
+# embed the SPA into the binary and serve it from the same :8080 axum server.
+serve-frontend = ["dep:rust-embed", "dep:mime_guess"]

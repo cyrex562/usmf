@@ -1,1 +1,10 @@
-app/__pycache__/
+legacy/python_prototype/app/__pycache__/
+
+# Rust
+backend/target/
+backend/**/*.db
+backend/**/*.db-journal
+
+# Vue
+frontend/node_modules/
+frontend/dist/

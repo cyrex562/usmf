@@ -1,0 +1,4 @@
+# Lets `cargo xtask <command>` be run from the repo root even though the
+# actual Cargo workspace lives in backend/. See backend/crates/xtask.
+[alias]
+xtask = "run --quiet --manifest-path backend/crates/xtask/Cargo.toml --"
