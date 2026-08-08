@@ -1,5 +1,7 @@
 pub mod routes;
 pub mod state;
+#[cfg(feature = "serve-frontend")]
+pub mod static_files;
 
 use axum::routing::{get, post};
 use axum::Router;
@@ -15,7 +17,7 @@ use state::AppState;
 pub fn app(pool: SqlitePool) -> Router {
     let state = AppState { pool };
 
-    Router::new()
+    let router = Router::new()
         .route("/health", get(routes::health))
         .route(
             "/api/components",
@@ -65,9 +67,14 @@ pub fn app(pool: SqlitePool) -> Router {
         .route(
             "/api/relationship-types",
             get(routes::list_relationship_types),
-        )
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        );
+
+    // Any route above wins; everything else falls through to the embedded
+    // SPA (release builds only -- see static_files.rs).
+    #[cfg(feature = "serve-frontend")]
+    let router = router.fallback(static_files::static_handler);
+
+    router.layer(CorsLayer::permissive()).with_state(state)
 }
 
 #[cfg(test)]

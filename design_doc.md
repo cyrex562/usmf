@@ -282,6 +282,9 @@ backend/
       ScenarioRepo, SimulationRepo)
     usmf-api/                 # binary crate, axum HTTP+WS server
       depends on core+db+sim, thin controllers, no business logic of its own
+      `serve-frontend` feature (off by default): embeds frontend/dist via rust-embed and serves
+      it as a fallback route alongside /api/*, so a release build is a single deployable binary.
+      Dev workflow (cargo run + `npm run dev` on separate ports) is unaffected either way.
 ```
 
 Why four crates instead of one: `usmf-sim` needs to be testable in isolation (feed it a scenario,
