@@ -5,6 +5,7 @@ members = [
     "crates/usmf-db",
     "crates/usmf-sim",
     "crates/usmf-api",
+    "crates/xtask",
 ]
 
 [workspace.package]

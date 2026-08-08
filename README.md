@@ -9,6 +9,23 @@ for the full architecture; this is just the quickstart.
 - `legacy/python_prototype/` — the original FastAPI/HTMX prototype this project is superseding.
 - `old/` — pre-2020 design documents/spreadsheets, kept for domain reference.
 
+## Quickstart (`cargo xtask`)
+
+`backend/crates/xtask` wraps the cargo/npm commands below into single commands, runnable from the
+repo root (alias in `.cargo/config.toml`):
+
+```
+cargo xtask dev       # backend (:8080) + frontend (:5173) dev servers together, hot reload
+cargo xtask run       # build + run the single embedded release binary (serves everything on :8080)
+cargo xtask build     # build frontend dist/ and the backend workspace
+cargo xtask test      # cargo test --workspace
+cargo xtask lint      # clippy (both feature sets) + cargo fmt --check
+cargo xtask ci        # test + lint + build -- everything that should be clean before committing
+```
+
+Run `cargo xtask` with no arguments for the full list. The sections below are the equivalent
+manual commands, useful if you want to run just one tool directly.
+
 ## Backend
 
 ```
