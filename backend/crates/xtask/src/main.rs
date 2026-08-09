@@ -4,8 +4,9 @@
 //! instead of remembering which tool to run in which directory.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
@@ -167,10 +168,13 @@ fn run_release(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Runs the backend and frontend dev servers side by side. Both are spawned
-/// as normal foreground children (same process group), so Ctrl+C in the
-/// terminal reaches them directly without any signal-forwarding here -- this
-/// just waits for both and surfaces whichever one failed.
+/// Runs the backend and frontend dev servers side by side, as normal
+/// foreground children (same process group, so Ctrl+C in the terminal
+/// reaches them directly). Neither is expected to exit on its own -- both
+/// are polled in a loop so that if *either* dies early (bad `PATH`, a port
+/// already in use, a missing dependency, ...) we notice within ~200ms and
+/// kill the other, instead of silently blocking forever on whichever one
+/// happens to be checked first.
 fn dev(paths: &Paths) -> Result<()> {
     ensure_frontend_deps(paths)?;
 
@@ -179,38 +183,35 @@ fn dev(paths: &Paths) -> Result<()> {
          frontend (the app) on http://localhost:5173\n"
     );
 
-    let backend_dir = paths.backend.clone();
-    let backend = thread::spawn(move || -> Result<ExitStatus> {
-        let mut cmd = Command::new("cargo");
-        cmd.args(["run", "-p", "usmf-api"])
-            .current_dir(&backend_dir);
-        // usmf-api's tracing::info! startup/request logs are otherwise silent
-        // without RUST_LOG set, which makes it look like only the frontend
-        // (which prints its own loud "ready" banner) actually started.
-        if std::env::var("RUST_LOG").is_err() {
-            cmd.env("RUST_LOG", "usmf_api=info,tower_http=info");
+    let mut backend_cmd = Command::new("cargo");
+    backend_cmd
+        .args(["run", "-p", "usmf-api"])
+        .current_dir(&paths.backend);
+    // usmf-api's tracing::info! startup/request logs are otherwise silent
+    // without RUST_LOG set, which makes it look like only the frontend
+    // (which prints its own loud "ready" banner) actually started.
+    if std::env::var("RUST_LOG").is_err() {
+        backend_cmd.env("RUST_LOG", "usmf_api=info,tower_http=info");
+    }
+    let mut backend = backend_cmd
+        .spawn()
+        .context("failed to spawn `cargo run -p usmf-api`")?;
+
+    let mut frontend = Command::new("npm")
+        .args(["run", "dev"])
+        .current_dir(&paths.frontend)
+        .spawn()
+        .context("failed to spawn `npm run dev`")?;
+
+    loop {
+        if let Some(status) = backend.try_wait().context("failed to poll backend")? {
+            let _ = frontend.kill();
+            bail!("backend dev server exited early with {status}");
         }
-        cmd.status()
-            .context("failed to spawn `cargo run -p usmf-api`")
-    });
-
-    let frontend_dir = paths.frontend.clone();
-    let frontend = thread::spawn(move || -> Result<ExitStatus> {
-        Command::new("npm")
-            .args(["run", "dev"])
-            .current_dir(&frontend_dir)
-            .status()
-            .context("failed to spawn `npm run dev`")
-    });
-
-    let backend_status = backend.join().expect("backend thread panicked")?;
-    let frontend_status = frontend.join().expect("frontend thread panicked")?;
-
-    if !backend_status.success() {
-        bail!("backend dev server exited with {backend_status}");
+        if let Some(status) = frontend.try_wait().context("failed to poll frontend")? {
+            let _ = backend.kill();
+            bail!("frontend dev server exited early with {status}");
+        }
+        thread::sleep(Duration::from_millis(200));
     }
-    if !frontend_status.success() {
-        bail!("frontend dev server exited with {frontend_status}");
-    }
-    Ok(())
 }
