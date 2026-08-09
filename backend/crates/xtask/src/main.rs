@@ -71,34 +71,58 @@ fn print_help() {
     );
 }
 
+/// Builds a `Command` that runs `npm <args>`, not yet given a working
+/// directory. On Windows, npm is installed as `npm.cmd`, which
+/// `std::process::Command::new("npm")` can't locate/exec directly --
+/// `CreateProcess` needs a real PE executable and won't search `PATHEXT`
+/// the way an interactive shell does, so it fails with a bare "program not
+/// found" even though `npm` works fine when typed at a prompt. Routing
+/// through `cmd /C` lets Windows's own shell resolve and run it, same as
+/// everywhere else on that platform; other OSes run `npm` directly.
+fn npm(args: &[&str]) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg("npm").args(args);
+        cmd
+    } else {
+        let mut cmd = Command::new("npm");
+        cmd.args(args);
+        cmd
+    }
+}
+
 /// Runs `program args...` in `dir`, streaming stdout/stderr straight through,
 /// and turns a non-zero exit into an `Err` so callers can just use `?`.
 fn run_in(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    run_command(cmd, dir, &format!("{program} {}", args.join(" ")))
+}
+
+/// Same as `run_in`, but for a `Command` already built by the caller (e.g.
+/// via `npm()`), which may not literally be `label` (a `cmd /C npm ...`
+/// wrapper on Windows) -- `label` is just what gets shown in errors.
+fn run_command(mut cmd: Command, dir: &Path, label: &str) -> Result<()> {
+    let status = cmd
         .current_dir(dir)
         .status()
-        .with_context(|| format!("failed to spawn `{program} {}`", args.join(" ")))?;
+        .with_context(|| format!("failed to spawn `{label}`"))?;
     if !status.success() {
-        bail!(
-            "`{program} {}` (in {}) exited with {status}",
-            args.join(" "),
-            dir.display()
-        );
+        bail!("`{label}` (in {}) exited with {status}", dir.display());
     }
     Ok(())
 }
 
 fn ensure_frontend_deps(paths: &Paths) -> Result<()> {
     if !paths.frontend.join("node_modules").is_dir() {
-        run_in(&paths.frontend, "npm", &["install"])?;
+        run_command(npm(&["install"]), &paths.frontend, "npm install")?;
     }
     Ok(())
 }
 
 fn frontend_build(paths: &Paths) -> Result<()> {
     ensure_frontend_deps(paths)?;
-    run_in(&paths.frontend, "npm", &["run", "build"])
+    run_command(npm(&["run", "build"]), &paths.frontend, "npm run build")
 }
 
 fn build(paths: &Paths) -> Result<()> {
@@ -153,7 +177,10 @@ fn release(paths: &Paths) -> Result<PathBuf> {
             "serve-frontend",
         ],
     )?;
-    Ok(paths.backend.join("target/release/usmf-api"))
+    Ok(paths.backend.join(format!(
+        "target/release/usmf-api{}",
+        std::env::consts::EXE_SUFFIX
+    )))
 }
 
 fn run_release(paths: &Paths) -> Result<()> {
@@ -197,8 +224,7 @@ fn dev(paths: &Paths) -> Result<()> {
         .spawn()
         .context("failed to spawn `cargo run -p usmf-api`")?;
 
-    let mut frontend = Command::new("npm")
-        .args(["run", "dev"])
+    let mut frontend = npm(&["run", "dev"])
         .current_dir(&paths.frontend)
         .spawn()
         .context("failed to spawn `npm run dev`")?;
