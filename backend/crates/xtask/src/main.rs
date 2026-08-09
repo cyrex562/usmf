@@ -174,12 +174,23 @@ fn run_release(paths: &Paths) -> Result<()> {
 fn dev(paths: &Paths) -> Result<()> {
     ensure_frontend_deps(paths)?;
 
+    println!(
+        "Starting dev servers -- backend (API only) on http://localhost:8080, \
+         frontend (the app) on http://localhost:5173\n"
+    );
+
     let backend_dir = paths.backend.clone();
     let backend = thread::spawn(move || -> Result<ExitStatus> {
-        Command::new("cargo")
-            .args(["run", "-p", "usmf-api"])
-            .current_dir(&backend_dir)
-            .status()
+        let mut cmd = Command::new("cargo");
+        cmd.args(["run", "-p", "usmf-api"])
+            .current_dir(&backend_dir);
+        // usmf-api's tracing::info! startup/request logs are otherwise silent
+        // without RUST_LOG set, which makes it look like only the frontend
+        // (which prints its own loud "ready" banner) actually started.
+        if std::env::var("RUST_LOG").is_err() {
+            cmd.env("RUST_LOG", "usmf_api=info,tower_http=info");
+        }
+        cmd.status()
             .context("failed to spawn `cargo run -p usmf-api`")
     });
 

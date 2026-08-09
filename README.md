@@ -23,6 +23,10 @@ cargo xtask lint      # clippy (both feature sets) + cargo fmt --check
 cargo xtask ci        # test + lint + build -- everything that should be clean before committing
 ```
 
+`dev` runs two separate servers: `usmf-api` is API-only there (`/api/*` + `/health`; hitting `:8080/`
+directly is a 404 by design), and **the app itself is at http://localhost:5173**. Only `run`'s
+single embedded binary serves the app from `:8080`.
+
 Run `cargo xtask` with no arguments for the full list. The sections below are the equivalent
 manual commands, useful if you want to run just one tool directly.
 
