@@ -70,6 +70,34 @@ Asset and PersonnelType both validate/total through the same shared logic (`usmf
 "a capacity slotted with components" is the same problem whether the capacity belongs to a vehicle
 or a person.
 
+**Rulesets — how Component stats plug into combat resolution.** A **ruleset** (`RulesetId`, e.g.
+`"cepheus_vehicle_v1"`, `"aggregate_strength_v1"`) is a named, versioned combat-resolution model: its
+own to-hit method, its own damage/penetration math, its own way of depleting a combatant's health
+pool. This is the mechanism for plugging in a different rule system — including material from a
+future source book — without redesigning `usmf-core`'s shapes per book: a new ruleset is an
+additional `CombatResolver` implementation in `usmf-sim` (§3.7) plus, where needed, an additional
+namespaced block in `Component.stats`, not a schema change.
+
+A weapon/armor Component's `stats` blob can carry a `rulesets` map alongside its existing flat
+fields, one entry per ruleset it has data for:
+```
+stats: { weight, space, cost, ..., rulesets: {
+  "cepheus_vehicle_v1": { damage_dice: "6D6", damage_type: "Sap", armor_front: 40, armor_side: 25, armor_rear: 15 },
+  "aggregate_strength_v1": { combat_power: 12 },
+} }
+```
+The same Component can carry data for several rulesets at once (a tank gun has both a granular
+Cepheus profile and a coarse combat-power number) — which one gets read at combat time is chosen by
+the *defender's* granularity, not hardcoded per weapon (§3.7). A Component with no entry for the
+active ruleset simply can't damage that target under that ruleset — a design-time validation/UI
+concern for Phase 2+, not an engine crash.
+
+`CombatProfile` — the rolled-up, per-ruleset combat picture for an Asset or PersonnelType — is
+computed by `rollup_unit`'s existing aggregation pass the same way capability tags already roll up
+("This Brigade has Level 4 Cyber," above): sum armor components' `armor_*` fields, sum weapon
+components' `combat_power`, etc., per ruleset. An Asset doesn't need a hand-authored parallel combat
+data structure — it falls out of its loadout the same way weight/cost/capabilities already do.
+
 **Unit** — a node in the force structure. Composition and command are two separate concerns, not one
 `parent_id` column:
 ```
@@ -160,6 +188,35 @@ forces: [{ side_name, root_unit_id, start_positions: [(unit_id, q, r)], starting
 don't occupy a hex themselves; their position for C2-range purposes is derived as the centroid (or
 nearest-subordinate) of their effective subordinates, computed at simulation time.
 
+**Combat granularity — individual vs. aggregate.** The same Unit definition (design-time) can be
+*placed* at different resolutions depending on the scenario's scale — a "Tank Platoon: 4× M1A5" TO&E
+entry might be four separately-tracked vehicles in a platoon-level skirmish, or one strength-point
+stack in a division-scale battle (a division is ~50,000 people and thousands of vehicles; nothing
+about the engine should require simulating each one as a full individual). This is a placement-time
+choice, not a property of the Unit itself:
+```
+start_positions: [(unit_id, q, r, granularity: Individual | Aggregate)]
+```
+mirroring the `Simplified(count) | Detailed([...])` choice PersonnelType composition already makes
+above — same idea, applied at the combat-resolution layer instead of the composition layer.
+`granularity` defaults to `Aggregate` above a configurable headcount/quantity threshold and
+`Individual` below it, overridable per placement.
+
+At scenario start, each placement is **expanded** into one or more `CombatantState`s:
+- **Individual** — one `CombatantState` per Asset/PersonnelType instance, each carrying its own
+  `CombatProfile` (armor, hull points, structure points, crew) under whichever ruleset that
+  Component data supports (e.g. `cepheus_vehicle_v1`) — this is what gives named vehicles/crews
+  the Component Damage Table-style texture worth having at small scale.
+- **Aggregate** — one `CombatantState` per placement representing the whole stack, carrying a
+  single `strength_points` pool seeded from the *existing* `rollup_unit` combat-power aggregation
+  (§2.1) — no new number to invent, it's the same figure the "This Brigade has Level 4 Cyber"-style
+  rollup already computes — resolved under an aggregate ruleset (e.g. `aggregate_strength_v1`,
+  §3.7) that does strength-vs-strength attrition instead of per-shot penetration.
+
+`UnitState`/`CombatantState` gains `granularity: Individual | Aggregate` and `ruleset_id: RulesetId`
+so the engine knows which `CombatResolver` to invoke for a given combatant without re-deriving it
+every attack.
+
 **SimulationRun / UnitState / SimulationEvent** — kept from V2, `UnitState` gains spatial fields:
 ```
 UnitState: ... existing morale/supply/personnel/is_destroyed/is_hq_connected fields, plus
@@ -223,8 +280,12 @@ actions" — until AP runs out, an action fails to apply, or the combatant expli
   isn't reachable). Debits AP by the path's actual cost.
 - **Attack** — requires the target within the attacker's weapon `range_hexes` and line of sight
   (`usmf-sim::los::has_line_of_sight`, elevation-aware hex line-trace); costs a fixed
-  `attack_ap_cost`. To-hit currently scales linearly with range (closer = more likely); cover/
-  suppression modifiers are not wired in yet (§8).
+  `attack_ap_cost`. Resolution is dispatched by the defender's `ruleset_id` (§2.2) to the matching
+  `CombatResolver` (§3.7) — to-hit and damage math live entirely inside that resolver, not in the
+  Attack action itself. Today's linear-range-scaled hit chance against a flat `hit_points` pool
+  becomes the `legacy_linear_v1` resolver (the only one registered until §3.7's granular/aggregate
+  rulesets land); cover/suppression modifiers are a per-resolver concern, not wired into any
+  resolver yet (§8).
 - **Use ability** — not yet implemented; the `Action` enum has room to grow (abilities tied to a
   unit's `capabilities` tags from §2.1, e.g. an "indirect_fire" capability unlocking an indirect-fire
   action) once there's a concrete ability to build against.
@@ -257,6 +318,53 @@ same overrides in, same events out: needed for a usable replay/event log.
 The client drives pacing: submit this round's overrides (if any) and call `step` to resolve one round
 (like V2's `/api/simulations/{id}/step`, now resolving a round instead of a WEGO turn), or request
 auto-play where the server steps on a timer and pushes each round's events over WebSocket — see §5.
+
+### 3.7 Combat resolver architecture (pluggable rulesets)
+
+Combat resolution is a `CombatResolver` trait in `usmf-sim`, not a single hardcoded formula, so a
+new rule system — a different book's vehicle combat rules, a different era's aggregate CRT, a
+homebrew variant — plugs in as one more implementation instead of a rewrite of the Attack action:
+```
+trait CombatResolver {
+    fn ruleset_id(&self) -> RulesetId;
+    fn resolve_attack(&self, attacker: &CombatantState, defender: &CombatantState,
+                       ctx: &CombatContext, rng: &mut ChaCha8Rng) -> AttackOutcome;
+}
+```
+`AttackOutcome` is wide enough to cover both granularities without either resolver lying about the
+other's shape:
+```
+enum AttackOutcome {
+    Miss,
+    IndividualHit { hull_lost: u32, structure_lost: u32, component_effects: Vec<ComponentDamageEffect> },
+    AggregateHit { strength_lost: u32 },
+}
+```
+A `ResolverRegistry` (`HashMap<RulesetId, Box<dyn CombatResolver>>`), built once at engine init, is
+what the Attack action consults using the *defender's* `ruleset_id` — resolution is chosen by who's
+being shot at, not by the attacker's weapon type, since a mixed engagement (an individually-tracked
+tank firing into an aggregate infantry-company stack) still needs exactly one outcome shape to
+apply.
+
+Two resolvers ship as the built-in set:
+- **`legacy_linear_v1`** — today's range-scaled hit chance against a flat `hit_points` pool; the
+  default for any combatant without a more specific ruleset assigned, so nothing regresses while
+  granular/aggregate rulesets are rolled out incrementally.
+- **`aggregate_strength_v1`** — a combat-power-ratio CRT (classic wargame odds table: attacker:
+  defender combat-power ratio → a results row like "defender −X% strength," "defender eliminated,"
+  "no effect," "attacker −X% strength"), reading `CombatProfile.combat_power` (§2.1) on both sides.
+
+`cepheus_vehicle_v1` — the granular penetration pipeline (damage dice, SAP/AP armor-ignore, hull/
+structure points, Component Damage Table) — is the first non-legacy resolver to build, once Hull
+Points and the full penetration/component-damage tables are confirmed (open design questions
+tracked outside this doc).
+
+Adding a ruleset from a new source book means: a new `CombatResolver` impl in `usmf-sim`, a
+namespaced entry in the relevant Components' `stats.rulesets` (§2.1), and a row in a new `rulesets`
+DB table (id, display name, source, granularity support) mirroring how `relationship_type_specs`
+makes relationship types data-driven (§2.1) — metadata is data, the resolution math is still Rust,
+the same boundary the relationship-type system already draws between "configurable" and "requires
+code."
 
 ## 4. System architecture
 
@@ -400,9 +508,11 @@ through a completed run, chassis-type management UI (replacing the old hardcoded
   affects whether the WebSocket protocol needs auth/session separation per side.
 - Map size ceiling and whether SVG rendering holds up, or a Canvas/PixiJS rewrite of `HexGrid.vue`
   becomes necessary — defer until Phase 3 gives real hex counts to benchmark against.
-- Whether `usmf-sim`'s combat resolution should support pluggable rule sets (e.g. different damage
-  models per era/genre) — the old spreadsheets in `old/` suggest this project has iterated through
-  several rule systems before; worth a skim before Phase 4 locks in one resolution formula.
+- Pluggable combat rule sets: resolved by §3.7's `CombatResolver` trait + registry and §2.2's
+  individual/aggregate granularity split. Still open: actually mining `old/`'s prior rule-system
+  iterations (USMF I–VI, `harsh_realm_tables.xlsx`, `system_control_tables.xlsx`, etc.) for reusable
+  data before authoring `cepheus_vehicle_v1`/`aggregate_strength_v1` from scratch — worth a skim
+  before Phase 4 locks in the first two resolvers' actual numbers.
 - Cycle prevention for `Organic` relationships: nothing yet stops a unit from organically reporting
   to its own descendant. Not a problem for the non-command relationship types (a unit can be
   Attached/OPCON in a loop-free way even if graph cycles are technically representable), but the
