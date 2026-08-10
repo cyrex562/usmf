@@ -37,6 +37,25 @@ pub struct ComponentStats {
     /// sum, so one fast element doesn't get diluted by slower ones.
     #[serde(default)]
     pub initiative: f64,
+    /// Contribution to a combatant's per-round action-point budget
+    /// (`CombatantState::max_action_points`, design_doc.md §8) -- same shape
+    /// as `initiative`: additive across a loadout, and `base_action_points`
+    /// takes the max across own_assets/personnel rather than summing, so one
+    /// well-equipped element sets the pace instead of being diluted.
+    #[serde(default)]
+    pub action_points: f64,
+    /// A weapon Component's cost, in action points, to fire
+    /// (`CombatantState::attack_ap_cost`). Per-weapon, like `damage`/
+    /// `range_hexes` -- not summed across a loadout (see `usmf-sim::spawn`'s
+    /// representative-weapon selection).
+    #[serde(default)]
+    pub attack_ap_cost: u32,
+    /// Contribution to whatever carries this component's `hit_points` pool
+    /// (`legacy_linear_v1`'s health pool -- design_doc.md §8) -- summed
+    /// across a loadout the same way `weight`/`cost` already are, since a
+    /// chassis/armor Component's toughness genuinely does add up.
+    #[serde(default)]
+    pub hit_points: f64,
     #[serde(default)]
     pub capabilities: HashMap<String, i32>,
     /// Per-ruleset combat data (design_doc.md §2.1) -- e.g. a weapon's

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use usmf_core::{
-    base_initiative, rollup_unit, AssetTotals, CombatProfile, Granularity, HexCoord,
-    PersonnelComposition, PersonnelTotals, Unit,
+    base_action_points, base_initiative, rollup_unit, AssetTotals, CombatProfile, Granularity,
+    HexCoord, PersonnelComposition, PersonnelTotals, Unit,
 };
 
 use crate::combat::{CepheusWeapon, AGGREGATE_STRENGTH_V1, CEPHEUS_VEHICLE_V1, LEGACY_LINEAR_V1};
@@ -21,25 +21,62 @@ pub struct WeaponProfiles {
     pub personnel: HashMap<i64, CepheusWeapon>,
 }
 
+/// A specific weapon's `legacy_linear_v1` attack profile (design_doc.md §8,
+/// issue #24): range/damage/AP-cost, read directly off `ComponentStats`'
+/// existing `range_hexes`/`damage`/`attack_ap_cost` fields for a
+/// representative weapon Component. Per-weapon, not summable across a
+/// loadout -- same non-summable category as `CepheusWeapon` (`WeaponProfiles`'
+/// doc comment), for the same reason: two different weapons' ranges/costs
+/// don't mean anything added together.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LegacyWeaponProfile {
+    pub range_hexes: u32,
+    pub damage: f64,
+    pub attack_ap_cost: u32,
+}
+
+/// `LegacyWeaponProfile`, keyed by Asset/PersonnelType, mirroring
+/// `WeaponProfiles`' shape exactly -- same "caller pre-assembles from real
+/// Component data" reasoning, just for `legacy_linear_v1` instead of
+/// `cepheus_vehicle_v1`.
+#[derive(Debug, Clone, Default)]
+pub struct LegacyWeaponProfiles {
+    pub assets: HashMap<i64, LegacyWeaponProfile>,
+    pub personnel: HashMap<i64, LegacyWeaponProfile>,
+}
+
 /// Threshold (in expanded-instance count, `instance_count`) above which a
 /// placement defaults to `Aggregate` granularity when the scenario doesn't
 /// specify one explicitly (design_doc.md §2.2). A parameter, not a hardcoded
 /// cutoff baked into `resolve_granularity` itself, so a caller can tune it.
 pub const DEFAULT_AGGREGATE_THRESHOLD: u32 = 20;
 
-/// Every `CombatantState` field that isn't yet derivable from Component
-/// stats -- `max_action_points`/`attack_ap_cost`/weapon stats/`hit_points`
-/// deriving from a specific weapon/chassis Component is a separate, still-
-/// open question (design_doc.md §8), not something this issue's granularity
-/// split resolves. Callers supply these until that lands; every instance
-/// produced by one `expand_placement` call currently gets the same values.
+/// Fallback weapon profile for whatever `LegacyWeaponProfiles` doesn't cover
+/// -- `Aggregate`-granularity combatants (no single "the" weapon for a whole
+/// stack) and any `Individual` instance whose Asset/PersonnelType has no
+/// `LegacyWeaponProfile` entry. `hit_points` and `max_action_points` used to
+/// live here too (issue #14's original `CombatDefaults`) but are now always
+/// derivable -- `hit_points` from the existing `CombatProfile`/`UnitRollup`
+/// rollup (a chassis/armor Component's toughness, like weight/cost, is
+/// genuinely summable) and `max_action_points` from `base_action_points`
+/// (mirrors `base_initiative` exactly) -- so this narrows to just the
+/// per-weapon fields that still can't be derived without a representative
+/// weapon to pick.
 #[derive(Debug, Clone, Copy)]
 pub struct CombatDefaults {
-    pub hit_points: f64,
     pub weapon_range_hexes: u32,
     pub weapon_damage: f64,
     pub attack_ap_cost: u32,
-    pub max_action_points: u32,
+}
+
+impl CombatDefaults {
+    fn as_legacy_weapon_profile(&self) -> LegacyWeaponProfile {
+        LegacyWeaponProfile {
+            range_hexes: self.weapon_range_hexes,
+            damage: self.weapon_damage,
+            attack_ap_cost: self.attack_ap_cost,
+        }
+    }
 }
 
 /// How many individual instances (own_assets + detailed personnel) `unit`
@@ -114,21 +151,37 @@ fn cepheus_numeric_fields(profile: &CombatProfile) -> (Option<f64>, Option<f64>,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything about a specific `expand_placement` instance that varies
+/// per-Asset/PersonnelType, bundled for readability -- unlike
+/// `base_initiative`/`max_action_points`, which are unit-wide (§3's
+/// "fastest/most capable element sets the pace" rule, `base_max_stat`) and
+/// computed once per placement, not per instance.
+struct InstanceData<'a> {
+    ruleset_id: String,
+    profile: Option<&'a CombatProfile>,
+    weapon: Option<CepheusWeapon>,
+    hit_points: f64,
+    legacy_weapon: LegacyWeaponProfile,
+}
+
 fn combatant_from_totals(
     id: i64,
     source_unit_id: i64,
     side: &str,
     position: HexCoord,
     base_initiative: f64,
-    ruleset_id: String,
-    profile: Option<&CombatProfile>,
-    weapon: Option<CepheusWeapon>,
-    defaults: CombatDefaults,
+    max_action_points: f64,
+    data: InstanceData,
 ) -> CombatantState {
-    let (armor, hull_points, structure_points) = profile
+    let (armor, hull_points, structure_points) = data
+        .profile
         .map(cepheus_numeric_fields)
         .unwrap_or((None, None, None));
+    // base_action_points is f64 (mirrors base_initiative, ComponentStats::
+    // action_points), CombatantState::max_action_points is u32 -- round
+    // rather than truncate so e.g. 9.6 from several small contributions
+    // doesn't get quietly knocked down to 9.
+    let max_action_points = max_action_points.round().max(0.0) as u32;
 
     CombatantState {
         combatant_id: id,
@@ -136,20 +189,20 @@ fn combatant_from_totals(
         side: side.to_string(),
         position,
         base_initiative,
-        max_action_points: defaults.max_action_points,
-        action_points: defaults.max_action_points,
-        weapon_range_hexes: defaults.weapon_range_hexes,
-        weapon_damage: defaults.weapon_damage,
-        attack_ap_cost: defaults.attack_ap_cost,
-        hit_points: defaults.hit_points,
+        max_action_points,
+        action_points: max_action_points,
+        weapon_range_hexes: data.legacy_weapon.range_hexes,
+        weapon_damage: data.legacy_weapon.damage,
+        attack_ap_cost: data.legacy_weapon.attack_ap_cost,
+        hit_points: data.hit_points,
         destroyed: false,
-        ruleset_id,
+        ruleset_id: data.ruleset_id,
         granularity: Granularity::Individual,
         strength_points: None,
         armor,
         hull_points,
         structure_points,
-        weapon,
+        weapon: data.weapon,
     }
 }
 
@@ -177,9 +230,12 @@ pub fn expand_placement(
     asset_totals: &HashMap<i64, AssetTotals>,
     personnel_totals: &HashMap<i64, PersonnelTotals>,
     weapons: &WeaponProfiles,
+    legacy_weapons: &LegacyWeaponProfiles,
     defaults: CombatDefaults,
 ) -> Vec<CombatantState> {
     let initiative = base_initiative(unit, asset_totals, personnel_totals);
+    let max_action_points = base_action_points(unit, asset_totals, personnel_totals);
+    let default_legacy_weapon = defaults.as_legacy_weapon_profile();
 
     match granularity {
         Granularity::Aggregate => {
@@ -204,10 +260,17 @@ pub fn expand_placement(
                 side,
                 position,
                 initiative,
-                AGGREGATE_STRENGTH_V1.to_string(),
-                None,
-                None,
-                defaults,
+                max_action_points,
+                InstanceData {
+                    ruleset_id: AGGREGATE_STRENGTH_V1.to_string(),
+                    profile: None,
+                    weapon: None,
+                    // No single "the" weapon for a whole stack (this issue's
+                    // scope is Individual instances, per #24), so Aggregate
+                    // keeps using the caller-supplied fallback.
+                    hit_points: rollup.hit_points,
+                    legacy_weapon: default_legacy_weapon,
+                },
             );
             combatant.granularity = Granularity::Aggregate;
             combatant.strength_points = Some(strength_points);
@@ -224,6 +287,11 @@ pub fn expand_placement(
                 let ruleset_id = individual_ruleset_id(totals);
                 let profile = totals.combat_profiles.get(CEPHEUS_VEHICLE_V1);
                 let weapon = weapons.assets.get(&owned.asset_id).copied();
+                let legacy_weapon = legacy_weapons
+                    .assets
+                    .get(&owned.asset_id)
+                    .copied()
+                    .unwrap_or(default_legacy_weapon);
                 for _ in 0..owned.quantity {
                     instances.push(combatant_from_totals(
                         combatant_id(unit.id, index),
@@ -231,10 +299,14 @@ pub fn expand_placement(
                         side,
                         position,
                         initiative,
-                        ruleset_id.clone(),
-                        profile,
-                        weapon,
-                        defaults,
+                        max_action_points,
+                        InstanceData {
+                            ruleset_id: ruleset_id.clone(),
+                            profile,
+                            weapon,
+                            hit_points: totals.hit_points,
+                            legacy_weapon,
+                        },
                     ));
                     index += 1;
                 }
@@ -248,6 +320,11 @@ pub fn expand_placement(
                     let ruleset_id = individual_ruleset_id(totals);
                     let profile = totals.combat_profiles.get(CEPHEUS_VEHICLE_V1);
                     let weapon = weapons.personnel.get(&entry.personnel_type_id).copied();
+                    let legacy_weapon = legacy_weapons
+                        .personnel
+                        .get(&entry.personnel_type_id)
+                        .copied()
+                        .unwrap_or(default_legacy_weapon);
                     for _ in 0..entry.quantity {
                         instances.push(combatant_from_totals(
                             combatant_id(unit.id, index),
@@ -255,10 +332,14 @@ pub fn expand_placement(
                             side,
                             position,
                             initiative,
-                            ruleset_id.clone(),
-                            profile,
-                            weapon,
-                            defaults,
+                            max_action_points,
+                            InstanceData {
+                                ruleset_id: ruleset_id.clone(),
+                                profile,
+                                weapon,
+                                hit_points: totals.hit_points,
+                                legacy_weapon,
+                            },
                         ));
                         index += 1;
                     }
@@ -282,11 +363,9 @@ mod tests {
 
     fn defaults() -> CombatDefaults {
         CombatDefaults {
-            hit_points: 100.0,
             weapon_range_hexes: 4,
             weapon_damage: 20.0,
             attack_ap_cost: 4,
-            max_action_points: 10,
         }
     }
 
@@ -360,6 +439,7 @@ mod tests {
             &asset_totals,
             &HashMap::new(),
             &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -411,6 +491,7 @@ mod tests {
             &asset_totals,
             &HashMap::new(),
             &weapons,
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -444,6 +525,7 @@ mod tests {
             &asset_totals,
             &HashMap::new(),
             &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -474,6 +556,7 @@ mod tests {
             &asset_totals,
             &personnel_totals,
             &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -496,6 +579,7 @@ mod tests {
             &asset_totals,
             &HashMap::new(),
             &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -551,6 +635,7 @@ mod tests {
             &HashMap::new(),
             &personnel_totals,
             &weapons,
+            &LegacyWeaponProfiles::default(),
             defaults(),
         );
 
@@ -565,5 +650,130 @@ mod tests {
                 damage_type: CepheusDamageType::Ap(2),
             })
         );
+    }
+
+    #[test]
+    fn individual_hit_points_and_action_points_derive_from_real_component_data() {
+        let unit = unit_with_assets(1, 10, 1);
+        let mut asset_totals = HashMap::new();
+        asset_totals.insert(
+            10,
+            AssetTotals {
+                hit_points: 75.0,
+                action_points: 6.0,
+                ..Default::default()
+            },
+        );
+
+        let combatants = expand_placement(
+            &unit,
+            "blue",
+            HexCoord::new(0, 0),
+            Granularity::Individual,
+            &asset_totals,
+            &HashMap::new(),
+            &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
+            defaults(),
+        );
+
+        assert_eq!(combatants.len(), 1);
+        assert_eq!(combatants[0].hit_points, 75.0);
+        assert_eq!(combatants[0].max_action_points, 6);
+        assert_eq!(combatants[0].action_points, 6);
+    }
+
+    #[test]
+    fn individual_weapon_stats_derive_from_legacy_weapon_profile_when_present() {
+        let unit = unit_with_assets(1, 10, 1);
+        let asset_totals = HashMap::from([(10, AssetTotals::default())]);
+        let legacy_weapons = LegacyWeaponProfiles {
+            assets: HashMap::from([(
+                10,
+                LegacyWeaponProfile {
+                    range_hexes: 8,
+                    damage: 65.0,
+                    attack_ap_cost: 6,
+                },
+            )]),
+            personnel: HashMap::new(),
+        };
+
+        let combatants = expand_placement(
+            &unit,
+            "blue",
+            HexCoord::new(0, 0),
+            Granularity::Individual,
+            &asset_totals,
+            &HashMap::new(),
+            &WeaponProfiles::default(),
+            &legacy_weapons,
+            defaults(),
+        );
+
+        assert_eq!(combatants.len(), 1);
+        assert_eq!(combatants[0].weapon_range_hexes, 8);
+        assert_eq!(combatants[0].weapon_damage, 65.0);
+        assert_eq!(combatants[0].attack_ap_cost, 6);
+    }
+
+    #[test]
+    fn individual_weapon_stats_fall_back_to_combat_defaults_without_a_legacy_profile() {
+        let unit = unit_with_assets(1, 10, 1);
+        let asset_totals = HashMap::from([(10, AssetTotals::default())]);
+
+        let combatants = expand_placement(
+            &unit,
+            "blue",
+            HexCoord::new(0, 0),
+            Granularity::Individual,
+            &asset_totals,
+            &HashMap::new(),
+            &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
+            defaults(),
+        );
+
+        assert_eq!(combatants.len(), 1);
+        assert_eq!(
+            combatants[0].weapon_range_hexes,
+            defaults().weapon_range_hexes
+        );
+        assert_eq!(combatants[0].weapon_damage, defaults().weapon_damage);
+        assert_eq!(combatants[0].attack_ap_cost, defaults().attack_ap_cost);
+    }
+
+    #[test]
+    fn aggregate_hit_points_and_action_points_derive_from_unit_rollup() {
+        let unit = unit_with_assets(1, 10, 4);
+        let asset_totals = HashMap::from([(
+            10,
+            AssetTotals {
+                hit_points: 20.0,
+                action_points: 7.0,
+                ..Default::default()
+            },
+        )]);
+
+        let combatants = expand_placement(
+            &unit,
+            "blue",
+            HexCoord::new(0, 0),
+            Granularity::Aggregate,
+            &asset_totals,
+            &HashMap::new(),
+            &WeaponProfiles::default(),
+            &LegacyWeaponProfiles::default(),
+            defaults(),
+        );
+
+        assert_eq!(combatants.len(), 1);
+        // 4 assets * 20.0 hit_points each, scaled by quantity in
+        // AssetTotals -> UnitRollup, same as the existing strength_points test.
+        assert_eq!(combatants[0].hit_points, 80.0);
+        // action_points takes the max across owned assets (base_action_points
+        // mirrors base_initiative), not a sum -- a single asset type here, so
+        // it's just that asset's own value.
+        assert_eq!(combatants[0].max_action_points, 7);
     }
 }
