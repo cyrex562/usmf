@@ -274,8 +274,46 @@ side has explicitly overridden that specific unit for this round:
   block mid-round waiting on input — overrides are submitted *before* the round resolves, alongside
   (or instead of) letting AI handle everything else.
 
-This is intentionally the smallest version of "hybrid control" that works: no standing-orders/rules-
-of-engagement editor yet (see §8) — just "AI unless told otherwise for this unit, this round."
+This was intentionally the smallest version of "hybrid control" that works: no standing-orders/rules-
+of-engagement concept yet. Design settled by #29:
+
+- **Vocabulary** — a `StandingOrder { stance: EngagementStance, objective: Option<HexCoord> }`, two
+  independent axes rather than one combined vocabulary:
+  - `stance` ∈ `Aggressive` (today's exact behavior — the default when no order is set, so nothing
+    regresses for a unit without one) | `Defensive` (attack if an enemy is already in range and LOS,
+    but never *advance* to close the distance) | `HoldFire` (never initiate an `Attack`, regardless of
+    range).
+  - `objective: Option<HexCoord>` — when not actively attacking, advance toward this hex instead of
+    the nearest enemy. Independent of `stance`, so "advance to objective" and "free fire vs. hold
+    fire" compose (e.g. `Aggressive` + an objective still fires opportunistically at anything in range
+    while marching toward the objective, matching "commander sets objectives, AI executes them").
+  - Target-type prioritization (the issue's fourth suggested item) is deliberately **not** in this
+    first vocabulary — `decide_ai_action`'s target selection is a single `(distance, combatant_id)`
+    sort with nothing on `CombatantState` to filter by (no target-type/threat tag exists anywhere
+    today); adding one is its own follow-up once this smaller vocabulary is proven, not guessed at
+    alongside it.
+- **Where orders live** — associated with the design-time `Unit` for persistence/editing (so a
+  commander sets an objective once, not every round, and it survives across rounds without
+  resubmission — the opposite of `overrides`' per-round nature), but supplied to `resolve_round` as a
+  flattened `HashMap<i64, StandingOrder>` **keyed by `source_unit_id`**, mirroring exactly how
+  `overrides` is already a caller-supplied per-round parameter rather than something the engine looks
+  up itself. Not a new `CombatantState` field: `source_unit_id` already exists on every combatant and
+  is enough to look up its unit's order, and keying by unit (not by individual combatant) matches how
+  a commander actually gives orders — one order to "1st Platoon," not to each of its nine separately-
+  expanded riflemen. This also sidesteps a real constraint the design pass found: `source_unit_id` is
+  provenance-only today (`expand_placement` runs once at scenario start and nothing keeps a live link
+  from a `CombatantState` back to its `Unit`), so baking orders directly into `CombatantState` at
+  expansion time would mean a changed order never takes effect mid-run; a sibling lookup parameter
+  does not have that problem.
+- **Interaction with `overrides`** — standing orders become the new content of "default AI," not a
+  third control tier: `overrides` present for a combatant's turn still wins outright and runs
+  unchanged (direct control always takes precedence); when absent, `decide_ai_action` now reads the
+  combatant's `source_unit_id`'s order (defaulting to `Aggressive`/no objective, i.e. today's exact
+  behavior, if none is set) instead of always chasing the nearest enemy. `resolve_round`'s own
+  override-vs-AI branch doesn't change at all — only `decide_ai_action`'s internal logic and its
+  signature (a new `orders` parameter, sibling to the `states`/`map` it already takes) do.
+
+Implementation is tracked separately (#50).
 
 ### 3.3 Actions and the AP economy
 
@@ -651,6 +689,14 @@ Resolved since this section was last written:
   prose already sketched, and is standard for the genre this resolver is modeled on), no for
   `cepheus_vehicle_v1` or `legacy_linear_v1`. Implementation (new `AttackOutcome` variant, CRT
   redistribution, a fresh balance pass on the changed table) tracked separately (#39).
+- ~~The default AI (§3.2) was a one-line heuristic with no standing orders/rules-of-engagement/doctrine
+  concept~~ — design settled (#29, see §3.2): a two-axis `StandingOrder` (`stance` ∈
+  `Aggressive`/`Defensive`/`HoldFire`, plus an independent `objective: Option<HexCoord>`), associated
+  with the design-time `Unit` for persistence but supplied to `resolve_round` as a flattened lookup
+  keyed by `source_unit_id`, becoming the new content of "default AI" rather than a third control
+  tier — `overrides` still wins outright when present. Target-type prioritization deliberately left
+  out of this first vocabulary (nothing on `CombatantState` to filter by yet). Implementation tracked
+  separately (#50).
 
 Still open, now tracked as individual issues rather than bullets here:
 - Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
@@ -659,8 +705,6 @@ Still open, now tracked as individual issues rather than bullets here:
   becomes necessary — #31 (blocked on Phase 3 landing first).
 - UI for editing `relationship_type_specs` itself (a custom relationship type beyond the seeded six)
   — #30.
-- The default AI (§3.2) is a one-line heuristic with no standing orders/rules-of-engagement/doctrine
-  concept — #29.
 - ~~To-hit (§3.3) was still a simple range-scaled chance with no cover, suppression, or elevation
   modifiers~~ — design settled (#28, see §3.8): terrain modifiers extend `CombatContext`, each
   resolver folds them in independently. Spotting/movement checks/suppression/autofire/HE/ramming all
