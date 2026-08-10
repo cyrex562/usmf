@@ -382,11 +382,22 @@ onMounted(async () => {
             <dd>{{ rollup.personnel_headcount }}</dd>
             <dt>Daily supply draw</dt>
             <dd>{{ rollup.daily_supply_consumption }}</dd>
+            <dt>Hit points</dt>
+            <dd>{{ rollup.hit_points }}</dd>
           </dl>
           <p v-if="Object.keys(rollup.capabilities).length">
             <strong>Capabilities:</strong>
             {{ Object.entries(rollup.capabilities).map(([k, v]) => `${k}: ${v}`).join(', ') }}
           </p>
+          <div v-if="Object.keys(rollup.combat_profiles).length">
+            <strong>Combat profiles:</strong>
+            <ul>
+              <li v-for="(profile, ruleset) in rollup.combat_profiles" :key="ruleset">
+                {{ ruleset }}:
+                {{ Object.entries(profile).map(([k, v]) => `${k}: ${v}`).join(', ') }}
+              </li>
+            </ul>
+          </div>
           <ul v-if="rollup.span_of_control_warnings.length" class="violations">
             <li v-for="w in rollup.span_of_control_warnings" :key="w">{{ w }}</li>
           </ul>
