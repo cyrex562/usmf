@@ -4,6 +4,7 @@ use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use usmf_core::{HexCoord, Map};
 
+use crate::combat::{AttackOutcome, CombatContext, ResolverRegistry, RulesetId};
 use crate::los::has_line_of_sight;
 use crate::pathfinding::{find_path, path_cost};
 
@@ -32,6 +33,12 @@ pub struct CombatantState {
     pub attack_ap_cost: u32,
     pub hit_points: f64,
     pub destroyed: bool,
+    /// Which `CombatResolver` (§3.7) applies when this combatant is on the
+    /// *defending* side of an attack -- dispatch is keyed by the defender,
+    /// not the attacker's weapon (`crate::combat`). Defaults to
+    /// `LEGACY_LINEAR_V1` for every combatant that hasn't opted into a more
+    /// specific ruleset, so today's behavior is unchanged until #16/#17 land.
+    pub ruleset_id: RulesetId,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +119,7 @@ pub fn resolve_round(
     map: &Map,
     states: &mut HashMap<i64, CombatantState>,
     overrides: &HashMap<i64, Vec<Action>>,
+    registry: &ResolverRegistry,
     rng: &mut ChaCha8Rng,
 ) -> Vec<RoundEvent> {
     let mut events = Vec::new();
@@ -144,7 +152,15 @@ pub fn resolve_round(
                 if states[&unit_id].destroyed {
                     break;
                 }
-                let consumed = apply_action(map, states, unit_id, action.clone(), rng, &mut events);
+                let consumed = apply_action(
+                    map,
+                    states,
+                    unit_id,
+                    action.clone(),
+                    registry,
+                    rng,
+                    &mut events,
+                );
                 if !consumed {
                     break;
                 }
@@ -157,7 +173,8 @@ pub fn resolve_round(
                 }
                 let action = decide_ai_action(unit_id, states, map);
                 let is_pass = matches!(action, Action::Pass);
-                let consumed = apply_action(map, states, unit_id, action, rng, &mut events);
+                let consumed =
+                    apply_action(map, states, unit_id, action, registry, rng, &mut events);
                 if is_pass || !consumed {
                     break;
                 }
@@ -173,6 +190,7 @@ fn apply_action(
     states: &mut HashMap<i64, CombatantState>,
     unit_id: i64,
     action: Action,
+    registry: &ResolverRegistry,
     rng: &mut ChaCha8Rng,
     events: &mut Vec<RoundEvent>,
 ) -> bool {
@@ -237,9 +255,37 @@ fn apply_action(
                 return false;
             }
 
-            let hit_chance = 1.0 - (range as f64 / attacker.weapon_range_hexes.max(1) as f64) * 0.5;
-            let hit = rng.gen::<f64>() < hit_chance;
-            let damage = if hit { attacker.weapon_damage } else { 0.0 };
+            let Some(resolver) = registry.get(&target.ruleset_id) else {
+                events.push(RoundEvent::ActionBlocked {
+                    unit_id,
+                    reason: format!(
+                        "no CombatResolver registered for ruleset '{}'",
+                        target.ruleset_id
+                    ),
+                });
+                return false;
+            };
+            let ctx = CombatContext { range_hexes: range };
+            let outcome = resolver.resolve_attack(&attacker, &target, &ctx, rng);
+            let (hit, damage) = match outcome {
+                AttackOutcome::Miss => (false, 0.0),
+                AttackOutcome::LegacyHit { damage } => (true, damage),
+                // #16/#17 land the resolvers that produce these, and the
+                // CombatantState pools (hull/structure/strength points) they
+                // deplete -- surface as a blocked action rather than
+                // silently dropping the damage or guessing a translation
+                // into hit_points.
+                AttackOutcome::IndividualHit { .. } | AttackOutcome::AggregateHit { .. } => {
+                    events.push(RoundEvent::ActionBlocked {
+                        unit_id,
+                        reason: format!(
+                            "ruleset '{}' outcome not yet applied by the engine",
+                            target.ruleset_id
+                        ),
+                    });
+                    return false;
+                }
+            };
 
             if let Some(attacker_state) = states.get_mut(&unit_id) {
                 attacker_state.action_points = attacker_state
@@ -332,6 +378,7 @@ fn truncate_path_to_budget(map: &Map, path: &[HexCoord], budget: u32) -> Vec<Hex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::{default_registry, LEGACY_LINEAR_V1};
     use crate::rng::round_rng;
     use usmf_core::{HexCell, TerrainType};
 
@@ -373,6 +420,7 @@ mod tests {
             attack_ap_cost: 4,
             hit_points: 100.0,
             destroyed: false,
+            ruleset_id: LEGACY_LINEAR_V1.to_string(),
         }
     }
 
@@ -425,8 +473,9 @@ mod tests {
         states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
         states.insert(2, combatant(2, "red", HexCoord::new(2, 0), 0.0));
 
+        let registry = default_registry();
         let mut rng = round_rng(1, 1);
-        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
 
         assert!(events.iter().any(|e| matches!(
             e,
@@ -447,8 +496,9 @@ mod tests {
         states.insert(1, combatant(1, "blue", HexCoord::new(0, 0), 100.0));
         states.insert(2, combatant(2, "red", HexCoord::new(9, 0), 0.0));
 
+        let registry = default_registry();
         let mut rng = round_rng(1, 1);
-        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
 
         assert!(events
             .iter()
@@ -474,8 +524,9 @@ mod tests {
                 Action::Attack { target_unit_id: 2 },
             ],
         )]);
+        let registry = default_registry();
         let mut rng = round_rng(1, 1);
-        let events = resolve_round(&map, &mut states, &overrides, &mut rng);
+        let events = resolve_round(&map, &mut states, &overrides, &registry, &mut rng);
 
         assert!(events
             .iter()
@@ -502,8 +553,9 @@ mod tests {
         states.insert(2, combatant(2, "red", HexCoord::new(2, 0), 0.0));
 
         let overrides = HashMap::from([(1, vec![Action::Pass]), (2, vec![Action::Pass])]);
+        let registry = default_registry();
         let mut rng = round_rng(1, 1);
-        let events = resolve_round(&map, &mut states, &overrides, &mut rng);
+        let events = resolve_round(&map, &mut states, &overrides, &registry, &mut rng);
 
         assert!(events
             .iter()
@@ -524,8 +576,9 @@ mod tests {
         defender.hit_points = 10.0;
         states.insert(2, defender);
 
+        let registry = default_registry();
         let mut rng = round_rng(1, 1);
-        let events = resolve_round(&map, &mut states, &HashMap::new(), &mut rng);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
 
         assert!(events
             .iter()
