@@ -297,15 +297,15 @@ fn apply_action(
             };
             let ctx = CombatContext { range_hexes: range };
             let outcome = resolver.resolve_attack(&attacker, &target, &ctx, rng);
-            let (hit, damage) = match outcome {
+            let (hit, damage) = match &outcome {
                 AttackOutcome::Miss => (false, 0.0),
-                AttackOutcome::LegacyHit { damage } => (true, damage),
-                // #16/#17 land the resolvers that produce these, and the
-                // CombatantState pools (hull/structure/strength points) they
-                // deplete -- surface as a blocked action rather than
-                // silently dropping the damage or guessing a translation
-                // into hit_points.
-                AttackOutcome::IndividualHit { .. } | AttackOutcome::AggregateHit { .. } => {
+                AttackOutcome::LegacyHit { damage } => (true, *damage),
+                AttackOutcome::AggregateHit { strength_lost } => (true, *strength_lost as f64),
+                // #17 lands the resolver that produces this, and the
+                // per-vehicle hull/structure pools it deplete -- surface as
+                // a blocked action rather than silently dropping the damage
+                // or guessing a translation into hit_points.
+                AttackOutcome::IndividualHit { .. } => {
                     events.push(RoundEvent::ActionBlocked {
                         combatant_id,
                         reason: format!(
@@ -332,8 +332,18 @@ fn apply_action(
 
             if hit {
                 if let Some(target_state) = states.get_mut(&target_combatant_id) {
-                    target_state.hit_points -= damage;
-                    if target_state.hit_points <= 0.0 && !target_state.destroyed {
+                    // Aggregate combatants fight off strength_points, not
+                    // hit_points (design_doc.md §2.2) -- deplete whichever
+                    // pool this outcome actually represents.
+                    let destroyed_now = if matches!(outcome, AttackOutcome::AggregateHit { .. }) {
+                        let remaining = target_state.strength_points.unwrap_or(0.0) - damage;
+                        target_state.strength_points = Some(remaining);
+                        remaining <= 0.0
+                    } else {
+                        target_state.hit_points -= damage;
+                        target_state.hit_points <= 0.0
+                    };
+                    if destroyed_now && !target_state.destroyed {
                         target_state.destroyed = true;
                         events.push(RoundEvent::UnitDestroyed {
                             combatant_id: target_combatant_id,
@@ -408,7 +418,7 @@ fn truncate_path_to_budget(map: &Map, path: &[HexCoord], budget: u32) -> Vec<Hex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::{default_registry, LEGACY_LINEAR_V1};
+    use crate::combat::{default_registry, AGGREGATE_STRENGTH_V1, LEGACY_LINEAR_V1};
     use crate::rng::round_rng;
     use usmf_core::{HexCell, TerrainType};
 
@@ -627,6 +637,46 @@ mod tests {
             .iter()
             .any(|e| matches!(e, RoundEvent::UnitDestroyed { combatant_id: 2 })));
         // The dead unit never gets a TurnStarted of its own.
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            RoundEvent::TurnStarted {
+                combatant_id: 2,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn aggregate_stack_destroyed_by_strength_loss_is_skipped_when_its_turn_comes() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // Attacker goes first (high initiative). Its strength (1000) vs. the
+        // defender's (1.0) is an overwhelming ratio (>= 5:1), which
+        // combat::AggregateStrengthV1's CRT guarantees a hit on regardless
+        // of the RNG draw (see combat::tests) -- and at strength_points =
+        // 1.0, any nonzero loss fraction rounds up to exactly 1 point lost,
+        // zeroing the stack out in a single hit deterministically.
+        let mut attacker = combatant(1, "blue", HexCoord::new(0, 0), 100.0);
+        attacker.ruleset_id = AGGREGATE_STRENGTH_V1.to_string();
+        attacker.granularity = Granularity::Aggregate;
+        attacker.strength_points = Some(1000.0);
+        states.insert(1, attacker);
+
+        let mut defender = combatant(2, "red", HexCoord::new(1, 0), 0.0);
+        defender.ruleset_id = AGGREGATE_STRENGTH_V1.to_string();
+        defender.granularity = Granularity::Aggregate;
+        defender.strength_points = Some(1.0);
+        states.insert(2, defender);
+
+        let registry = default_registry();
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
+
+        assert_eq!(states[&2].strength_points, Some(0.0));
+        assert!(states[&2].destroyed);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::UnitDestroyed { combatant_id: 2 })));
         assert!(!events.iter().any(|e| matches!(
             e,
             RoundEvent::TurnStarted {
