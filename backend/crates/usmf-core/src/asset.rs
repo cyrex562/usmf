@@ -46,6 +46,7 @@ pub fn validate_asset(
 mod tests {
     use super::*;
     use crate::component::{ComponentStats, ComponentType};
+    use std::collections::HashMap;
 
     fn component(id: i64, weight: f64, space: f64, power_gen: f64, power_draw: f64) -> Component {
         Component {
@@ -112,6 +113,68 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.contains("Insufficient power")));
+    }
+
+    #[test]
+    fn combat_profiles_sum_across_two_components_for_the_same_ruleset() {
+        let chassis = ChassisSpec {
+            name: "Heavy Tracked".into(),
+            max_weight: 8000.0,
+            max_space: 20.0,
+            base_cost: 5000.0,
+        };
+        let main_gun = Component {
+            id: 1,
+            name: "Main Gun".into(),
+            component_type: ComponentType::Weapon,
+            stats: ComponentStats {
+                rulesets: HashMap::from([(
+                    "aggregate_strength_v1".to_string(),
+                    serde_json::json!({"combat_power": 10.0}),
+                )]),
+                ..Default::default()
+            },
+        };
+        let coax_mg = Component {
+            id: 2,
+            name: "Coax MG".into(),
+            component_type: ComponentType::Weapon,
+            stats: ComponentStats {
+                rulesets: HashMap::from([(
+                    "aggregate_strength_v1".to_string(),
+                    serde_json::json!({"combat_power": 2.0}),
+                )]),
+                ..Default::default()
+            },
+        };
+        let components = vec![main_gun, coax_mg];
+        let asset = Asset {
+            id: 1,
+            name: "Tank".into(),
+            chassis_type: chassis.name.clone(),
+            components: vec![
+                AssetComponent {
+                    component_id: 1,
+                    quantity: 1,
+                },
+                AssetComponent {
+                    component_id: 2,
+                    quantity: 1,
+                },
+            ],
+        };
+
+        let result = validate_asset(&asset, Some(&chassis), &components);
+        assert_eq!(
+            result.totals.combat_profiles["aggregate_strength_v1"]["combat_power"],
+            12.0
+        );
+        // No component contributed anything under this ruleset -- absent,
+        // not a default-zero guess.
+        assert!(!result
+            .totals
+            .combat_profiles
+            .contains_key("cepheus_vehicle_v1"));
     }
 
     #[test]

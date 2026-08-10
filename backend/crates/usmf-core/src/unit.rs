@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::asset::AssetTotals;
 use crate::personnel::PersonnelTotals;
+use crate::ruleset::{merge_combat_profiles, CombatProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +195,14 @@ pub struct UnitRollup {
     pub personnel_headcount: u32,
     pub daily_supply_consumption: f64,
     pub capabilities: HashMap<String, i32>,
+    /// Per-ruleset combat picture (design_doc.md §2.1, §2.2), rolled up the
+    /// same way `capabilities` already is: per own_assets/personnel like
+    /// weight/cost, and folded in from subordinates gated by
+    /// `includes_in_combat_power_rollup` -- the same relationship rule that
+    /// already gates weight/cost/capabilities, since this *is* the combat
+    /// power those rules describe. This is what an `Aggregate`-granularity
+    /// placement (§2.2) seeds its `strength_points` from.
+    pub combat_profiles: HashMap<String, CombatProfile>,
     pub span_of_control_warnings: Vec<String>,
 }
 
@@ -273,6 +282,7 @@ pub fn rollup_unit(
                     *rollup.capabilities.entry(tag.clone()).or_insert(0) +=
                         level * owned.quantity as i32;
                 }
+                merge_combat_profiles(&mut rollup.combat_profiles, &totals.combat_profiles, qty);
             }
         }
 
@@ -289,6 +299,11 @@ pub fn rollup_unit(
                             *rollup.capabilities.entry(tag.clone()).or_insert(0) +=
                                 level * entry.quantity as i32;
                         }
+                        merge_combat_profiles(
+                            &mut rollup.combat_profiles,
+                            &totals.combat_profiles,
+                            qty,
+                        );
                     }
                 }
             }
@@ -331,6 +346,11 @@ pub fn rollup_unit(
                 for (tag, level) in child_rollup.capabilities {
                     *rollup.capabilities.entry(tag).or_insert(0) += level;
                 }
+                merge_combat_profiles(
+                    &mut rollup.combat_profiles,
+                    &child_rollup.combat_profiles,
+                    1.0,
+                );
             }
             if rel.rules.sustainment_transfers {
                 rollup.daily_supply_consumption += child_rollup.daily_supply_consumption;
@@ -548,6 +568,61 @@ mod tests {
         assert_eq!(rollup.cost, 1500.0);
         assert_eq!(rollup.capabilities.get("indirect_fire"), Some(&2));
         assert!(rollup.span_of_control_warnings.is_empty());
+    }
+
+    #[test]
+    fn rolls_up_combat_profiles_through_organic_tree() {
+        // Same tree shape as the leaf-totals test above: an HQ with two
+        // organic leaves, each holding one asset. Both assets contribute to
+        // aggregate_strength_v1's combat_power; only one contributes to
+        // cepheus_vehicle_v1, and only for a field it actually has data for.
+        let units = vec![hq(1, Some(2)), leaf(2, 10), leaf(3, 11)];
+        let relationships = vec![organic(1, 1, 2), organic(2, 1, 3)];
+        let mut asset_totals = HashMap::new();
+        asset_totals.insert(
+            10,
+            AssetTotals {
+                combat_profiles: HashMap::from([
+                    (
+                        "aggregate_strength_v1".to_string(),
+                        CombatProfile::from([("combat_power".to_string(), 5.0)]),
+                    ),
+                    (
+                        "cepheus_vehicle_v1".to_string(),
+                        CombatProfile::from([("hull_points".to_string(), 20.0)]),
+                    ),
+                ]),
+                ..Default::default()
+            },
+        );
+        asset_totals.insert(
+            11,
+            AssetTotals {
+                combat_profiles: HashMap::from([(
+                    "aggregate_strength_v1".to_string(),
+                    CombatProfile::from([("combat_power".to_string(), 3.0)]),
+                )]),
+                ..Default::default()
+            },
+        );
+
+        let rollup = rollup_unit(
+            1,
+            &units,
+            &relationships,
+            None,
+            &asset_totals,
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            rollup.combat_profiles["aggregate_strength_v1"]["combat_power"],
+            8.0
+        );
+        assert_eq!(
+            rollup.combat_profiles["cepheus_vehicle_v1"]["hull_points"],
+            20.0
+        );
     }
 
     #[test]

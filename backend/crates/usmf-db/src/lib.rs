@@ -2,6 +2,7 @@ mod assets;
 mod chassis_specs;
 mod components;
 mod personnel_types;
+mod rulesets;
 mod unit_relationships;
 mod units;
 
@@ -9,6 +10,7 @@ pub use assets::AssetRepo;
 pub use chassis_specs::ChassisSpecRepo;
 pub use components::ComponentRepo;
 pub use personnel_types::PersonnelTypeRepo;
+pub use rulesets::RulesetRepo;
 pub use unit_relationships::{CreateRelationshipError, UnitRelationshipRepo};
 pub use units::UnitRepo;
 

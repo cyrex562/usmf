@@ -4,6 +4,7 @@ pub mod hex;
 pub mod loadout;
 pub mod map;
 pub mod personnel;
+pub mod ruleset;
 pub mod scenario;
 pub mod unit;
 
@@ -18,6 +19,7 @@ pub use personnel::{
     validate_personnel_loadout, PersonnelLoadoutItem, PersonnelTotals, PersonnelType,
     PersonnelValidation,
 };
+pub use ruleset::{merge_combat_profiles, numeric_fields, CombatProfile, RulesetSpec};
 pub use scenario::{Scenario, ScenarioForce, StartPosition};
 pub use unit::{
     base_initiative, effective_subtree_unit_ids, rollup_unit, FormationKind, PersonnelComposition,

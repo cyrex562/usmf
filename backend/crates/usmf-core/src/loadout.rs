@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::component::Component;
+use crate::ruleset::{merge_combat_profiles, numeric_fields, CombatProfile};
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadoutCapacity {
@@ -26,6 +27,11 @@ pub struct LoadoutTotals {
     pub power_draw: f64,
     pub initiative: f64,
     pub capabilities: HashMap<String, i32>,
+    /// Per-ruleset combat picture (design_doc.md §2.1), rolled up the same
+    /// way as `capabilities`: every numeric field in each component's
+    /// `stats.rulesets.{ruleset_id}` block, scaled by quantity and summed
+    /// across the loadout (`ruleset::merge_combat_profiles`).
+    pub combat_profiles: HashMap<String, CombatProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +74,13 @@ pub fn validate_loadout(
         for (tag, level) in &stats.capabilities {
             *totals.capabilities.entry(tag.clone()).or_insert(0) += level * item.quantity as i32;
         }
+
+        let component_profiles: HashMap<String, CombatProfile> = stats
+            .rulesets
+            .iter()
+            .map(|(ruleset_id, raw)| (ruleset_id.clone(), numeric_fields(raw)))
+            .collect();
+        merge_combat_profiles(&mut totals.combat_profiles, &component_profiles, qty);
     }
 
     match capacity {
