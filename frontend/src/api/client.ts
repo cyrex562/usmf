@@ -8,6 +8,7 @@ import type {
   CreateComponentRequest,
   CreatePersonnelTypeRequest,
   CreateRelationshipRequest,
+  CreateRelationshipTypeRequest,
   DetachRelationshipRequest,
   PersonnelType,
   PersonnelValidation,
@@ -100,6 +101,11 @@ export const api = {
     return request<UnitRollup>(`/api/units/${id}/rollup${qs ? `?${qs}` : ''}`)
   },
   listRelationshipTypes: () => request<RelationshipTypeSpec[]>('/api/relationship-types'),
+  createRelationshipType: (body: CreateRelationshipTypeRequest) =>
+    request<RelationshipTypeSpec>('/api/relationship-types', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   listRelationships: () => request<UnitRelationship[]>('/api/relationships'),
   listRelationshipsForUnit: (id: number) =>
     request<UnitRelationship[]>(`/api/units/${id}/relationships`),
