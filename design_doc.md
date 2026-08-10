@@ -554,7 +554,14 @@ Resolved since this section was last written:
 - ~~The Component Damage Table (per-crew/per-subsystem hit effects)~~ — design settled (#25): see
   §2.2 and §3.7's `ComponentDamageEffect` — a closed set of whole-combatant status results (a `crew`
   pool plus weapon/mobility/fire/electronics flags), not identified sub-entities, since per-instance
-  Component identity doesn't survive to combat time. Implementation tracked separately.
+  Component identity doesn't survive to combat time. Implementation tracked separately (#37).
+- ~~Balance pass on the placeholder CRT and Penetration Table numbers~~ — resolved (#26,
+  `docs/combat-balance-pass.md`): a Monte Carlo playtest across a spread of odds ratios and
+  weapon/armor matchups found both tables already smooth, monotonic, and free of degenerate
+  all-or-nothing outcomes — no retuning needed. The `PLACEHOLDER NUMBERS` doc comments on `CRT`/
+  `PENETRATION_TABLE` (`usmf-sim::combat`) are removed; the properties confirmed are pinned by the
+  `balance_pass` test module. #37's future `COMPONENT_DAMAGE_TABLE` will need its own such pass once
+  it exists.
 
 Still open, now tracked as individual issues rather than bullets here:
 - Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
