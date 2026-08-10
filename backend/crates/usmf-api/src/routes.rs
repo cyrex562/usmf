@@ -8,7 +8,8 @@ use serde::Deserialize;
 use usmf_core::{
     effective_subtree_unit_ids, rollup_unit, validate_asset, validate_personnel_loadout, Asset,
     AssetComponent, ChassisSpec, ComponentStats, ComponentType, FormationKind,
-    PersonnelComposition, PersonnelLoadoutItem, PersonnelType, Unit, UnitAsset, UnitType,
+    PersonnelComposition, PersonnelLoadoutItem, PersonnelType, RelationshipRules,
+    RelationshipTypeSpec, Unit, UnitAsset, UnitType,
 };
 use usmf_db::{
     AssetRepo, ChassisSpecRepo, ComponentRepo, CreateRelationshipError, PersonnelTypeRepo,
@@ -539,6 +540,36 @@ pub async fn list_relationship_types(State(state): State<AppState>) -> impl Into
         Ok(types) => Json(types).into_response(),
         Err(err) => {
             tracing::error!(%err, "failed to list relationship types");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateRelationshipTypeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub rules: RelationshipRules,
+}
+
+/// Adds a custom relationship type beyond the six seeded doctrinal ones
+/// (design_doc.md §2.1, §8 -- issue #30). `relationship_type_specs.name` is
+/// the table's primary key, so a duplicate name surfaces as a 500 the same
+/// way `create_chassis_spec` already treats its own name-PK collisions --
+/// no special-cased duplicate-name error, consistent with that precedent.
+pub async fn create_relationship_type(
+    State(state): State<AppState>,
+    Json(body): Json<CreateRelationshipTypeRequest>,
+) -> impl IntoResponse {
+    let repo = UnitRelationshipRepo::new(&state.pool);
+    let spec = RelationshipTypeSpec {
+        name: body.name,
+        rules: body.rules,
+    };
+    match repo.create_relationship_type(&spec).await {
+        Ok(()) => (StatusCode::CREATED, Json(spec)).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to create relationship type");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

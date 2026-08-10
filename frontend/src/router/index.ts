@@ -25,6 +25,11 @@ const router = createRouter({
       component: () => import('../views/UnitDesigner.vue'),
     },
     {
+      path: '/relationship-types',
+      name: 'relationship-type-library',
+      component: () => import('../views/RelationshipTypeLibrary.vue'),
+    },
+    {
       path: '/map',
       name: 'map-editor',
       component: () => import('../views/MapEditor.vue'),

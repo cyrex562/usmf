@@ -90,6 +90,19 @@ impl<'a> UnitRelationshipRepo<'a> {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    pub async fn create_relationship_type(&self, spec: &RelationshipTypeSpec) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO relationship_type_specs (name, includes_in_span_of_control, sustainment_transfers, includes_in_combat_power_rollup) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&spec.name)
+        .bind(spec.rules.includes_in_span_of_control)
+        .bind(spec.rules.sustainment_transfers)
+        .bind(spec.rules.includes_in_combat_power_rollup)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_all(&self) -> Result<Vec<UnitRelationship>> {
         // Joins relationship_type_specs so every row carries its resolved
         // RelationshipRules alongside the raw type label -- matches
@@ -301,6 +314,34 @@ mod tests {
         assert!(types
             .iter()
             .any(|t| t.name == "OPCON" && t.rules == RelationshipRules::OPCON));
+    }
+
+    #[tokio::test]
+    async fn create_relationship_type_adds_a_custom_type_usable_by_create() {
+        let pool = test_pool().await;
+        let repo = UnitRelationshipRepo::new(&pool);
+        let custom = RelationshipTypeSpec {
+            name: "Liaison".to_string(),
+            rules: RelationshipRules {
+                includes_in_span_of_control: false,
+                sustainment_transfers: false,
+                includes_in_combat_power_rollup: false,
+            },
+        };
+        repo.create_relationship_type(&custom).await.unwrap();
+
+        let types = repo.list_relationship_types().await.unwrap();
+        assert_eq!(types.len(), 7);
+        assert!(types
+            .iter()
+            .any(|t| t.name == "Liaison" && t.rules == custom.rules));
+
+        // The new type is immediately usable by create(), the same as any seeded one.
+        let hq = make_unit(&pool, "Division HQ").await;
+        let team = make_unit(&pool, "Liaison Team").await;
+        repo.create(hq, team, "Liaison", None, None, None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

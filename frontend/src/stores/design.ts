@@ -10,6 +10,7 @@ import type {
   CreateComponentRequest,
   CreatePersonnelTypeRequest,
   CreateRelationshipRequest,
+  CreateRelationshipTypeRequest,
   DetachRelationshipRequest,
   PersonnelType,
   PersonnelValidation,
@@ -126,6 +127,10 @@ export const useDesignStore = defineStore('design', {
     },
     async fetchRelationshipTypes() {
       this.relationshipTypes = await api.listRelationshipTypes()
+    },
+    async createRelationshipType(body: CreateRelationshipTypeRequest) {
+      await api.createRelationshipType(body)
+      await this.fetchRelationshipTypes()
     },
     async fetchRelationships() {
       this.relationships = await api.listRelationships()

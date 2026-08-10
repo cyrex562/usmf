@@ -188,6 +188,8 @@ export interface RelationshipTypeSpec {
   rules: RelationshipRules
 }
 
+export type CreateRelationshipTypeRequest = RelationshipTypeSpec
+
 export interface UnitRelationship {
   id: number
   superior_unit_id: number

@@ -66,7 +66,7 @@ pub fn app(pool: SqlitePool) -> Router {
         )
         .route(
             "/api/relationship-types",
-            get(routes::list_relationship_types),
+            get(routes::list_relationship_types).post(routes::create_relationship_type),
         );
 
     // Any route above wins; everything else falls through to the embedded
@@ -251,5 +251,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Issue #30: a custom relationship type beyond the seeded six is
+    /// creatable over HTTP, shows up in the list, and is immediately usable
+    /// by `POST /api/relationships`.
+    #[tokio::test]
+    async fn create_relationship_type_adds_a_custom_type() {
+        let app = test_app().await;
+
+        let created = post_json(
+            &app,
+            "/api/relationship-types",
+            json!({
+                "name": "Liaison",
+                "rules": {
+                    "includes_in_span_of_control": false,
+                    "sustainment_transfers": false,
+                    "includes_in_combat_power_rollup": false
+                }
+            }),
+        )
+        .await;
+        assert_eq!(created["name"], "Liaison");
+
+        let types = get_json(&app, "/api/relationship-types").await;
+        let names: Vec<&str> = types
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Liaison"));
+
+        let hq = post_json(
+            &app,
+            "/api/units",
+            json!({ "name": "Division HQ", "unit_type": "hq" }),
+        )
+        .await;
+        let team = post_json(
+            &app,
+            "/api/units",
+            json!({ "name": "Liaison Team", "unit_type": "support" }),
+        )
+        .await;
+        post_json(
+            &app,
+            "/api/relationships",
+            json!({
+                "superior_unit_id": hq["id"],
+                "subordinate_unit_id": team["id"],
+                "relationship_type": "Liaison"
+            }),
+        )
+        .await;
     }
 }
