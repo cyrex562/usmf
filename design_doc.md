@@ -206,7 +206,16 @@ At scenario start, each placement is **expanded** into one or more `CombatantSta
 - **Individual** — one `CombatantState` per Asset/PersonnelType instance, each carrying its own
   `CombatProfile` (armor, hull points, structure points, crew) under whichever ruleset that
   Component data supports (e.g. `cepheus_vehicle_v1`) — this is what gives named vehicles/crews
-  the Component Damage Table-style texture worth having at small scale.
+  the Component Damage Table-style texture worth having at small scale. That texture is
+  whole-combatant status (a `crew` pool plus a small set of effect flags — see §3.7's
+  `ComponentDamageEffect`), not identified sub-entities: every Asset/PersonnelType loadout is
+  already fully summed into scalar totals before a placement is expanded (§2.1's `validate_loadout`),
+  so there is no surviving "this vehicle's engine Component" to damage individually, and building
+  that would mean threading raw Component lists through the whole rollup pipeline instead of
+  pre-summed totals — out of proportion to what the Cepheus material's effects actually need. Each
+  individually-tracked combatant still gets its own independent `CombatantState`, so per-instance
+  divergence ("this specific tank is on fire, that one isn't") is free — it just isn't sub-divided
+  any further within one combatant.
 - **Aggregate** — one `CombatantState` per placement representing the whole stack, carrying a
   single `strength_points` pool seeded from the *existing* `rollup_unit` combat-power aggregation
   (§2.1) — no new number to invent, it's the same figure the "This Brigade has Level 4 Cyber"-style
@@ -339,7 +348,31 @@ enum AttackOutcome {
     IndividualHit { hull_lost: u32, structure_lost: u32, component_effects: Vec<ComponentDamageEffect> },
     AggregateHit { strength_lost: u32 },
 }
+enum ComponentDamageEffect {
+    WeaponDisabled,
+    Immobilized,
+    CrewCasualty(u32),
+    FireBreakout,
+    ElectronicsKnockedOut,
+}
 ```
+`ComponentDamageEffect` (design settled by #25) is a closed set of whole-combatant status results,
+not identified crew members or subsystem instances — see §2.2's note on why per-instance Component
+identity doesn't survive to combat time. `resolve_attack` returns these as data only; `apply_action`
+is what actually mutates the defender (decrementing a new `crew: Option<f64>` pool the same way
+`armor`/`hull_points`/`structure_points` already are, or setting a status flag/counter), keeping
+resolvers pure — the same split `hull_lost`/`structure_lost` already use today. `crew` needs no new
+rollup plumbing: `CombatProfile`'s `rulesets` JSON already round-trips a plain numeric `crew` field
+through `merge_combat_profiles` (nothing currently reads it into `CombatantState`; it just becomes
+one more field `spawn.rs::cepheus_numeric_fields` derives, alongside armor/hull/structure). The
+`# of rolls` column from the source Penetration Table material becomes a third element on
+`PENETRATION_TABLE`'s existing `(bound, hull_damage)` rows, driving that many rolls against a new
+`COMPONENT_DAMAGE_TABLE` (placeholder odds, same not-final treatment as `CRT`/`PENETRATION_TABLE`,
+pending #26's balance pass) per penetrating hit. Applies uniformly to Individual-granularity
+vehicles and Individual-granularity Detailed personnel (§2.2 already treats both the same way) —
+`crew` simply stays unpopulated for a PersonnelType whose loadout has no Component declaring one,
+while the other effects (weapon jammed, wounded/immobilized, on fire) apply just as sensibly to an
+individual soldier as to a vehicle.
 A `ResolverRegistry` (`HashMap<RulesetId, Box<dyn CombatResolver>>`), built once at engine init, is
 what the Attack action consults using the *defender's* `ruleset_id` — resolution is chosen by who's
 being shot at, not by the attacker's weapon type, since a mixed engagement (an individually-tracked
@@ -513,6 +546,15 @@ Resolved since this section was last written:
 - ~~Cycle prevention for `Organic` relationships~~ — implemented and tested in `UnitRelationshipRepo`
   (issue #6): an `Organic` relationship that would make a unit its own ancestor is rejected before
   insert; non-organic types aren't subject to the check, per §2.1's doctrinal-effects table.
+- ~~`max_action_points`/`attack_ap_cost`/weapon stats/`hit_points` were still flat per-combatant
+  values~~ — resolved (#24, merged): `usmf-sim::spawn::expand_placement` now derives all of these
+  from real Component/Asset/PersonnelType rollups (`WeaponProfiles`/`LegacyWeaponProfiles`), the same
+  way `cepheus_vehicle_v1`'s armor/hull/weapon data already was; `CombatDefaults` narrowed to just
+  the per-weapon fallback for Aggregate combatants and Individual instances with no profile entry.
+- ~~The Component Damage Table (per-crew/per-subsystem hit effects)~~ — design settled (#25): see
+  §2.2 and §3.7's `ComponentDamageEffect` — a closed set of whole-combatant status results (a `crew`
+  pool plus weapon/mobility/fire/electronics flags), not identified sub-entities, since per-instance
+  Component identity doesn't survive to combat time. Implementation tracked separately.
 
 Still open, now tracked as individual issues rather than bullets here:
 - Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
@@ -521,10 +563,6 @@ Still open, now tracked as individual issues rather than bullets here:
   becomes necessary — #31 (blocked on Phase 3 landing first).
 - UI for editing `relationship_type_specs` itself (a custom relationship type beyond the seeded six)
   — #30.
-- `max_action_points`/`attack_ap_cost`/weapon stats/`hit_points` are still flat per-combatant values
-  (`usmf-sim::spawn::CombatDefaults`), not derived from Component/Asset/PersonnelType stats the way
-  weapon range/damage/initiative already are for `cepheus_vehicle_v1`'s armor/hull/weapon data (#17)
-  — #24.
 - The default AI (§3.2) is a one-line heuristic with no standing orders/rules-of-engagement/doctrine
   concept — #29.
 - To-hit (§3.3) is still a simple range-scaled chance with no cover, suppression, or elevation
@@ -532,10 +570,5 @@ Still open, now tracked as individual issues rather than bullets here:
   read by combat resolution yet. Folded into #28 alongside the rest of the Cepheus material that
   didn't make it into the #11 milestone (spotting, movement/drive checks, chases, ramming, autofire,
   HE burst radius).
-
-New since the #11 milestone closed:
-- The Component Damage Table (per-crew/per-subsystem hit effects) — `AttackOutcome::IndividualHit`'s
-  `component_effects` field exists but stays empty until per-vehicle crew/subsystem tracking is
-  designed — #25.
 - Every `CombatResolver` only depletes the defender's pool; whether attacker-side losses (a standard
   CRT mechanic) are wanted at all is an open design decision — #27.
