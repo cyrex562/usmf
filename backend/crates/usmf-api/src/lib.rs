@@ -67,6 +67,11 @@ pub fn app(pool: SqlitePool) -> Router {
         .route(
             "/api/relationship-types",
             get(routes::list_relationship_types).post(routes::create_relationship_type),
+        )
+        .route("/api/maps", get(routes::list_maps).post(routes::create_map))
+        .route(
+            "/api/maps/{id}",
+            get(routes::get_map).put(routes::update_map),
         );
 
     // Any route above wins; everything else falls through to the embedded
@@ -306,5 +311,84 @@ mod tests {
             }),
         )
         .await;
+    }
+
+    /// Issue #31/Phase 3: a Map's full hex-cell grid round-trips through
+    /// create -> get, and an edit (update) fully replaces the grid rather
+    /// than merging.
+    #[tokio::test]
+    async fn map_create_get_and_update_round_trip_cells() {
+        let app = test_app().await;
+
+        let created = post_json(
+            &app,
+            "/api/maps",
+            json!({
+                "name": "Test Valley",
+                "width": 3,
+                "height": 2,
+                "cells": [
+                    { "coord": { "q": 0, "r": 0 }, "terrain": "plains", "elevation": 0 },
+                    { "coord": { "q": 1, "r": 0 }, "terrain": "forest", "elevation": 1 }
+                ]
+            }),
+        )
+        .await;
+        let id = created["id"].as_i64().unwrap();
+
+        let fetched = get_json(&app, &format!("/api/maps/{id}")).await;
+        assert_eq!(fetched["name"], "Test Valley");
+        assert_eq!(fetched["cells"].as_array().unwrap().len(), 2);
+
+        let listed = get_json(&app, "/api/maps").await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed[0]["cells"].as_array().unwrap().len(),
+            0,
+            "list should omit cells"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/maps/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "Test Valley (revised)",
+                            "width": 3,
+                            "height": 2,
+                            "cells": [
+                                { "coord": { "q": 2, "r": 2 }, "terrain": "road", "elevation": 0 }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        let updated = get_json(&app, &format!("/api/maps/{id}")).await;
+        assert_eq!(updated["name"], "Test Valley (revised)");
+        assert_eq!(updated["cells"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_map_404s_for_missing_map() {
+        let app = test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/maps/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

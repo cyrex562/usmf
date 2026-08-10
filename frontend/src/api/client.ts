@@ -10,6 +10,7 @@ import type {
   CreateRelationshipRequest,
   CreateRelationshipTypeRequest,
   DetachRelationshipRequest,
+  HexMap,
   PersonnelType,
   PersonnelValidation,
   RelationshipTypeSpec,
@@ -17,6 +18,7 @@ import type {
   Unit,
   UnitRelationship,
   UnitRollup,
+  UpsertMapRequest,
   UpsertUnitRequest,
   ValidateAssetRequest,
   ValidatePersonnelTypeRequest,
@@ -117,6 +119,18 @@ export const api = {
   detachRelationship: (id: number, body: DetachRelationshipRequest) =>
     request<{ id: number }>(`/api/relationships/${id}/detach`, {
       method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listMaps: () => request<HexMap[]>('/api/maps'),
+  getMap: (id: number) => request<HexMap>(`/api/maps/${id}`),
+  createMap: (body: UpsertMapRequest) =>
+    request<{ id: number }>('/api/maps', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateMap: (id: number, body: UpsertMapRequest) =>
+    request<{ id: number }>(`/api/maps/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(body),
     }),
 }

@@ -213,3 +213,31 @@ export type CreateRelationshipRequest = {
 export type DetachRelationshipRequest = {
   effective_until_turn: number
 }
+
+export type TerrainType = 'plains' | 'forest' | 'urban' | 'water' | 'hill' | 'road'
+
+export interface HexCoord {
+  q: number
+  r: number
+}
+
+export interface HexCell {
+  coord: HexCoord
+  terrain: TerrainType
+  elevation: number
+}
+
+export interface HexMap {
+  id: number
+  name: string
+  width: number
+  height: number
+  cells: HexCell[]
+}
+
+export type UpsertMapRequest = {
+  name: string
+  width: number
+  height: number
+  cells: HexCell[]
+}
