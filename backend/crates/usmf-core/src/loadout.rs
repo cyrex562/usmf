@@ -26,6 +26,12 @@ pub struct LoadoutTotals {
     pub power_gen: f64,
     pub power_draw: f64,
     pub initiative: f64,
+    /// Summed action-point contribution (see `ComponentStats::action_points`)
+    /// -- combined with `unit::base_action_points`'s max-across-own_assets
+    /// rule the same way `initiative`/`base_initiative` already work.
+    pub action_points: f64,
+    /// Summed `hit_points` contribution (see `ComponentStats::hit_points`).
+    pub hit_points: f64,
     pub capabilities: HashMap<String, i32>,
     /// Per-ruleset combat picture (design_doc.md §2.1), rolled up the same
     /// way as `capabilities`: every numeric field in each component's
@@ -71,6 +77,8 @@ pub fn validate_loadout(
         totals.power_gen += stats.power_gen * qty;
         totals.power_draw += stats.power_draw * qty;
         totals.initiative += stats.initiative * qty;
+        totals.action_points += stats.action_points * qty;
+        totals.hit_points += stats.hit_points * qty;
         for (tag, level) in &stats.capabilities {
             *totals.capabilities.entry(tag.clone()).or_insert(0) += level * item.quantity as i32;
         }

@@ -203,26 +203,34 @@ pub struct UnitRollup {
     /// power those rules describe. This is what an `Aggregate`-granularity
     /// placement (§2.2) seeds its `strength_points` from.
     pub combat_profiles: HashMap<String, CombatProfile>,
+    /// Summed `hit_points` contribution across own_assets/personnel and
+    /// (gated by `includes_in_combat_power_rollup`, same as weight/cost)
+    /// subordinates -- what an `Aggregate`-granularity placement (§2.2)
+    /// seeds a stack's `hit_points` from when it isn't using
+    /// `strength_points` instead (design_doc.md §8).
+    pub hit_points: f64,
     pub span_of_control_warnings: Vec<String>,
 }
 
-/// Baseline initiative for `usmf-sim`'s round loop (design_doc.md §3): the max
-/// individual-item initiative total among this unit's own directly-held
-/// assets/personnel -- "fastest/most alert element sets the pace," not a sum.
-/// Deliberately *not* recursive: only units that carry their own composition
-/// occupy a hex and take an initiative slot (§2.2), so a HQ's aggregate
-/// subordinate tree is irrelevant here. Units with no composition of their own
-/// (pure command nodes) return 0.0 and simply never enter the initiative order.
-pub fn base_initiative(
+/// Shared shape behind `base_initiative`/`base_action_points`: the max of a
+/// single `LoadoutTotals` field across a unit's own directly-held
+/// assets/personnel -- "fastest/most capable element sets the pace," not a
+/// sum, so one strong element doesn't get diluted by weaker ones alongside
+/// it. Deliberately *not* recursive: only units that carry their own
+/// composition occupy a hex and take an initiative/AP-budget slot (§2.2), so
+/// a HQ's aggregate subordinate tree is irrelevant here. Units with no
+/// composition of their own (pure command nodes) return 0.0.
+fn base_max_stat(
     unit: &Unit,
     asset_totals: &HashMap<i64, AssetTotals>,
     personnel_totals: &HashMap<i64, PersonnelTotals>,
+    field: impl Fn(&AssetTotals) -> f64,
 ) -> f64 {
     let mut contributions: Vec<f64> = unit
         .own_assets
         .iter()
         .filter_map(|owned| asset_totals.get(&owned.asset_id))
-        .map(|totals| totals.initiative)
+        .map(&field)
         .collect();
 
     if let PersonnelComposition::Detailed { entries } = &unit.personnel {
@@ -230,11 +238,32 @@ pub fn base_initiative(
             entries
                 .iter()
                 .filter_map(|entry| personnel_totals.get(&entry.personnel_type_id))
-                .map(|totals| totals.initiative),
+                .map(&field),
         );
     }
 
     contributions.into_iter().reduce(f64::max).unwrap_or(0.0)
+}
+
+/// Baseline initiative for `usmf-sim`'s round loop (design_doc.md §3) -- see
+/// `base_max_stat`.
+pub fn base_initiative(
+    unit: &Unit,
+    asset_totals: &HashMap<i64, AssetTotals>,
+    personnel_totals: &HashMap<i64, PersonnelTotals>,
+) -> f64 {
+    base_max_stat(unit, asset_totals, personnel_totals, |t| t.initiative)
+}
+
+/// Baseline per-round action-point budget
+/// (`usmf_sim::CombatantState::max_action_points`, design_doc.md §8) -- same
+/// shape as `base_initiative`, see `base_max_stat`.
+pub fn base_action_points(
+    unit: &Unit,
+    asset_totals: &HashMap<i64, AssetTotals>,
+    personnel_totals: &HashMap<i64, PersonnelTotals>,
+) -> f64 {
+    base_max_stat(unit, asset_totals, personnel_totals, |t| t.action_points)
 }
 
 /// Recursively rolls up a unit's own composition plus every subordinate reached
@@ -278,6 +307,7 @@ pub fn rollup_unit(
                 rollup.weight += totals.weight * qty;
                 rollup.cost += totals.cost * qty;
                 rollup.daily_supply_consumption += totals.power_draw * qty;
+                rollup.hit_points += totals.hit_points * qty;
                 for (tag, level) in &totals.capabilities {
                     *rollup.capabilities.entry(tag.clone()).or_insert(0) +=
                         level * owned.quantity as i32;
@@ -295,6 +325,7 @@ pub fn rollup_unit(
                         let qty = entry.quantity as f64;
                         rollup.weight += totals.weight * qty;
                         rollup.cost += totals.cost * qty;
+                        rollup.hit_points += totals.hit_points * qty;
                         for (tag, level) in &totals.capabilities {
                             *rollup.capabilities.entry(tag.clone()).or_insert(0) +=
                                 level * entry.quantity as i32;
@@ -343,6 +374,7 @@ pub fn rollup_unit(
                 rollup.weight += child_rollup.weight;
                 rollup.cost += child_rollup.cost;
                 rollup.personnel_headcount += child_rollup.personnel_headcount;
+                rollup.hit_points += child_rollup.hit_points;
                 for (tag, level) in child_rollup.capabilities {
                     *rollup.capabilities.entry(tag).or_insert(0) += level;
                 }
@@ -474,6 +506,44 @@ mod tests {
     }
 
     #[test]
+    fn base_action_points_takes_max_not_sum_across_own_assets() {
+        let mut unit = leaf(1, 10);
+        unit.own_assets.push(UnitAsset {
+            asset_id: 11,
+            quantity: 1,
+        });
+        let mut asset_totals = HashMap::new();
+        asset_totals.insert(
+            10,
+            AssetTotals {
+                action_points: 4.0,
+                ..Default::default()
+            },
+        );
+        asset_totals.insert(
+            11,
+            AssetTotals {
+                action_points: 9.0,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            base_action_points(&unit, &asset_totals, &HashMap::new()),
+            9.0
+        );
+    }
+
+    #[test]
+    fn base_action_points_defaults_to_zero_for_pure_command_node() {
+        let unit = hq(1, None);
+        assert_eq!(
+            base_action_points(&unit, &HashMap::new(), &HashMap::new()),
+            0.0
+        );
+    }
+
+    #[test]
     fn base_initiative_considers_detailed_personnel_too() {
         let mut unit = hq(1, None);
         unit.personnel = PersonnelComposition::Detailed {
@@ -542,6 +612,7 @@ mod tests {
             AssetTotals {
                 weight: 5000.0,
                 cost: 1000.0,
+                hit_points: 40.0,
                 capabilities: HashMap::from([("indirect_fire".to_string(), 1)]),
                 ..Default::default()
             },
@@ -551,6 +622,7 @@ mod tests {
             AssetTotals {
                 weight: 3000.0,
                 cost: 500.0,
+                hit_points: 25.0,
                 capabilities: HashMap::from([("indirect_fire".to_string(), 1)]),
                 ..Default::default()
             },
@@ -566,6 +638,7 @@ mod tests {
         );
         assert_eq!(rollup.weight, 8000.0);
         assert_eq!(rollup.cost, 1500.0);
+        assert_eq!(rollup.hit_points, 65.0);
         assert_eq!(rollup.capabilities.get("indirect_fire"), Some(&2));
         assert!(rollup.span_of_control_warnings.is_empty());
     }

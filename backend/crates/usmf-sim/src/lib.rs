@@ -15,6 +15,6 @@ pub use los::has_line_of_sight;
 pub use pathfinding::{find_path, path_cost};
 pub use rng::round_rng;
 pub use spawn::{
-    expand_placement, instance_count, resolve_granularity, CombatDefaults, WeaponProfiles,
-    DEFAULT_AGGREGATE_THRESHOLD,
+    expand_placement, instance_count, resolve_granularity, CombatDefaults, LegacyWeaponProfile,
+    LegacyWeaponProfiles, WeaponProfiles, DEFAULT_AGGREGATE_THRESHOLD,
 };
