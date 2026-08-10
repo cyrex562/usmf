@@ -134,22 +134,24 @@ impl CombatResolver for LegacyLinearV1 {
     }
 }
 
-/// **PLACEHOLDER NUMBERS -- not a final design.** Classic wargame combat-
-/// results-table shape (attacker:defender odds ratio -> a results row), per
-/// `design_doc.md` §3.7. Issue #15 (`docs/combat-resolver-research.md`)
-/// confirmed `old/`'s prior USMF rule iterations have nothing usable to seed
-/// this from -- no CRT, no odds table, nothing -- so these are originated,
-/// not migrated, and need a real balance/design pass before being treated as
-/// final (tracked by issue #16). Six odds columns, each a monotonically
-/// improving distribution over four outcomes: no effect, and the defender
-/// losing a quarter/half/all of its current `strength_points`.
+/// Classic wargame combat-results-table shape (attacker:defender odds ratio
+/// -> a results row), per `design_doc.md` §3.7. Issue #15
+/// (`docs/combat-resolver-research.md`) confirmed `old/`'s prior USMF rule
+/// iterations have nothing usable to seed this from -- no CRT, no odds
+/// table, nothing -- so these were originated, not migrated. Issue #26's
+/// balance-pass playtest (`docs/combat-balance-pass.md`) confirmed the
+/// resulting curve is smooth and monotonic across all six odds columns,
+/// with no degenerate all-or-nothing outcomes at either extreme -- see the
+/// `balance_pass` test module below for the pinned numeric properties. Six
+/// odds columns, each a monotonically improving distribution over four
+/// outcomes: no effect, and the defender losing a quarter/half/all of its
+/// current `strength_points`.
 ///
 /// Each row is `(cumulative_probability, defender_strength_loss_fraction)`;
 /// a uniform roll in `[0, 1)` picks the first row whose cumulative
 /// probability exceeds it. Deliberately continuous (matching
 /// `LegacyLinearV1`'s `rng.gen::<f64>()` style) rather than simulated
-/// discrete dice -- there's no existing dice-rolling helper in this crate,
-/// and one isn't worth introducing for numbers that are placeholders anyway.
+/// discrete dice -- there's no existing dice-rolling helper in this crate.
 const CRT: [[(f64, f64); 4]; 6] = [
     // 1:2 -- no effect .70, -25% .25, -50% .05, eliminated 0 (unreachable)
     [(0.70, 0.0), (0.95, 0.25), (1.00, 0.5), (1.00, 1.0)],
@@ -270,13 +272,18 @@ impl CepheusWeapon {
     }
 }
 
-/// **PLACEHOLDER NUMBERS -- not a final design**, same caveat as
-/// `AggregateStrengthV1`'s CRT: issue #15 confirmed `old/` has no
-/// penetration table to seed this from, so these are originated, not
-/// migrated (tracked by issue #17). `(upper_bound, hull_points_lost)` rows,
-/// sorted ascending by `upper_bound`; a `penetration_damage` value picks the
-/// first row whose bound it doesn't exceed, or the last row (the highest
-/// bracket) if it exceeds them all.
+/// Same origin as `AggregateStrengthV1`'s CRT: issue #15 confirmed `old/`
+/// has no penetration table to seed this from, so these were originated,
+/// not migrated. Issue #26's balance-pass playtest
+/// (`docs/combat-balance-pass.md`) exercised this table across hopeless,
+/// matched, and overwhelming weapon-vs-armor pairings and confirmed
+/// sensible behavior at each extreme -- bounces off entirely when
+/// outmatched, near-certain penetration when overwhelming, a real chance
+/// either way when matched -- see the `balance_pass` test module below for
+/// the pinned cases. `(upper_bound, hull_points_lost)` rows, sorted
+/// ascending by `upper_bound`; a `penetration_damage` value picks the first
+/// row whose bound it doesn't exceed, or the last row (the highest bracket)
+/// if it exceeds them all.
 const PENETRATION_TABLE: [(u32, u32); 6] =
     [(3, 1), (7, 2), (14, 4), (24, 8), (40, 15), (u32::MAX, 25)];
 
@@ -701,5 +708,118 @@ mod tests {
 
         let outcome = resolver.resolve_attack(&attacker, &defender, &ctx, &mut rng);
         assert_eq!(outcome, AttackOutcome::Miss);
+    }
+}
+
+/// Balance-pass regression tests (issue #26). Findings and methodology are
+/// written up in `docs/combat-balance-pass.md`; these tests pin the specific
+/// numeric properties that playtest validated, so a future edit to `CRT` or
+/// `PENETRATION_TABLE` gets caught here rather than silently drifting.
+#[cfg(test)]
+mod balance_pass {
+    use super::*;
+    use crate::rng::round_rng;
+
+    /// 200k-roll Monte Carlo estimate of `CRT`'s expected defender-loss
+    /// fraction at a given odds ratio -- same methodology as the playtest
+    /// documented in `docs/combat-balance-pass.md`.
+    fn simulated_avg_loss(ratio: f64, n: u32) -> f64 {
+        let mut rng = round_rng(1, 1);
+        let total: f64 = (0..n)
+            .map(|_| defender_loss_fraction(ratio, rng.gen::<f64>()))
+            .sum();
+        total / n as f64
+    }
+
+    #[test]
+    fn crt_expected_loss_increases_monotonically_with_odds() {
+        let ratios = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let losses: Vec<f64> = ratios
+            .iter()
+            .map(|&r| simulated_avg_loss(r, 200_000))
+            .collect();
+        for pair in losses.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "expected loss should strictly increase as odds improve: {losses:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crt_worst_odds_still_gives_attacker_a_real_chance() {
+        // 1:2 (and worse) shouldn't be a guaranteed whiff -- ~8-9% expected
+        // loss, confirmed by playtest, keeps a disadvantaged attack from
+        // being pure theater.
+        let avg_loss = simulated_avg_loss(0.5, 200_000);
+        assert!((0.05..0.15).contains(&avg_loss), "avg_loss={avg_loss}");
+    }
+
+    #[test]
+    fn crt_best_odds_never_guarantees_elimination() {
+        // Even 5:1+ leaves room for the defender to survive (elimination
+        // capped well under 100%) -- deliberate per the CRT's doc comment,
+        // confirmed by playtest to land around 65%, not 100%.
+        let mut rng = round_rng(1, 1);
+        let n = 200_000;
+        let eliminated = (0..n)
+            .filter(|_| defender_loss_fraction(5.0, rng.gen::<f64>()) >= 1.0)
+            .count();
+        let p_eliminated = eliminated as f64 / n as f64;
+        assert!(
+            (0.55..0.75).contains(&p_eliminated),
+            "p_eliminated={p_eliminated}"
+        );
+    }
+
+    fn simulated_penetration_rate(weapon: CepheusWeapon, armor: f64, n: u32) -> f64 {
+        let mut rng = round_rng(1, 1);
+        let penetrations = (0..n)
+            .filter(|_| {
+                let effective_armor = (armor - weapon.armor_ignore() as f64).max(0.0);
+                let roll = weapon.roll_damage(&mut rng) as f64;
+                roll > effective_armor
+            })
+            .count();
+        penetrations as f64 / n as f64
+    }
+
+    #[test]
+    fn penetration_hopeless_mismatch_never_penetrates() {
+        // A light weapon can't scratch heavy armor -- confirmed by playtest
+        // to be a clean 0%, not "rare but possible."
+        let weapon = CepheusWeapon {
+            dice_count: 4,
+            dice_sides: 6,
+            damage_type: CepheusDamageType::Sap,
+        };
+        assert_eq!(simulated_penetration_rate(weapon, 40.0, 50_000), 0.0);
+    }
+
+    #[test]
+    fn penetration_overwhelming_weapon_always_penetrates() {
+        // A heavy AP weapon against light armor should be a near-certain
+        // penetration (effective armor bottoms out at 0), matching the
+        // "overmatched target gets annihilated" feel confirmed by playtest.
+        let weapon = CepheusWeapon {
+            dice_count: 12,
+            dice_sides: 6,
+            damage_type: CepheusDamageType::Ap(2),
+        };
+        assert_eq!(simulated_penetration_rate(weapon, 12.0, 50_000), 1.0);
+    }
+
+    #[test]
+    fn penetration_matched_fight_lands_in_the_middle() {
+        // A roughly matched weapon/armor pair shouldn't land at either
+        // extreme -- playtest found ~90% for this pairing, comfortably
+        // inside a "usually penetrates, sometimes bounces" band.
+        let weapon = CepheusWeapon {
+            dice_count: 6,
+            dice_sides: 6,
+            damage_type: CepheusDamageType::Sap,
+        };
+        let rate = simulated_penetration_rate(weapon, 18.0, 200_000);
+        assert!((0.75..0.99).contains(&rate), "rate={rate}");
     }
 }
