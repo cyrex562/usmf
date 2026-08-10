@@ -41,10 +41,15 @@ const TERRAIN_COLORS: Record<TerrainType, number> = {
   road: 0xd8c48a,
 }
 
+const MIN_SCALE = 0.2
+const MAX_SCALE = 4
+
 const host = ref<HTMLDivElement | null>(null)
 let app: Application | null = null
+let world: Container | null = null
 let terrainLayer: Graphics | null = null
 let overlayLayer: Container | null = null
+let resizeObserver: ResizeObserver | null = null
 
 function axialToPixel(q: number, r: number, size: number): { x: number; y: number } {
   return {
@@ -79,6 +84,15 @@ function pixelToAxial(x: number, y: number, size: number): HexCoord {
   const q = ((Math.sqrt(3) / 3) * x - (1 / 3) * y) / size
   const r = ((2 / 3) * y) / size
   return axialRound(q, r)
+}
+
+// Stage-space (post pan/zoom) -> world-space (the coordinate system
+// axialToPixel/pixelToAxial work in), computed from `world`'s own
+// position/scale rather than PixiJS's toLocal, since a Container's
+// documented position/scale fields are all this needs.
+function toWorld(x: number, y: number): { x: number; y: number } {
+  if (!world) return { x, y }
+  return { x: (x - world.position.x) / world.scale.x, y: (y - world.position.y) / world.scale.y }
 }
 
 function drawTerrain() {
@@ -117,6 +131,70 @@ function drawOverlays() {
   }
 }
 
+// Scales+centers `world` so every hex is visible and the grid isn't stuck in
+// one corner of a much larger canvas -- the default view on mount and
+// whenever the map itself changes (a fresh/different map, not a paint).
+function fitToView() {
+  if (!app || !world) return
+  const cells = props.map.cells
+  if (!cells.length) {
+    world.scale.set(1)
+    world.position.set(app.screen.width / 2, app.screen.height / 2)
+    return
+  }
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const cell of cells) {
+    const { x, y } = axialToPixel(cell.coord.q, cell.coord.r, props.hexSize)
+    minX = Math.min(minX, x - props.hexSize)
+    maxX = Math.max(maxX, x + props.hexSize)
+    minY = Math.min(minY, y - props.hexSize)
+    maxY = Math.max(maxY, y + props.hexSize)
+  }
+  const contentWidth = Math.max(maxX - minX, 1)
+  const contentHeight = Math.max(maxY - minY, 1)
+  const scale = clampScale(
+    Math.min(app.screen.width / contentWidth, app.screen.height / contentHeight) * 0.92,
+  )
+  world.scale.set(scale)
+  world.position.set(
+    app.screen.width / 2 - ((minX + maxX) / 2) * scale,
+    app.screen.height / 2 - ((minY + maxY) / 2) * scale,
+  )
+}
+
+function clampScale(scale: number): number {
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale))
+}
+
+// True once the user has zoomed or panned by hand -- gates whether a
+// container resize (window resize, sidebar toggle, ResizeObserver firing)
+// is allowed to call fitToView() and silently wipe out that manual view.
+// Before any manual interaction, resizing keeps auto-fitting (so the
+// initial load looks right regardless of viewport size); the explicit
+// "fit and center" button resets this back to auto-fit-on-resize mode.
+let userAdjustedView = false
+
+function zoomBy(factor: number, center?: { x: number; y: number }) {
+  if (!app || !world) return
+  userAdjustedView = true
+  const pivot = center ?? { x: app.screen.width / 2, y: app.screen.height / 2 }
+  const before = toWorld(pivot.x, pivot.y)
+  const newScale = clampScale(world.scale.x * factor)
+  world.scale.set(newScale)
+  world.position.set(pivot.x - before.x * newScale, pivot.y - before.y * newScale)
+}
+
+function recenter() {
+  userAdjustedView = false
+  fitToView()
+}
+
+let dragState: { startX: number; startY: number; originX: number; originY: number; moved: boolean } | null =
+  null
+
 onMounted(async () => {
   app = new Application()
   await app.init({
@@ -126,41 +204,117 @@ onMounted(async () => {
   })
   host.value?.appendChild(app.canvas)
 
+  world = new Container()
   terrainLayer = new Graphics()
   overlayLayer = new Container()
-  app.stage.addChild(terrainLayer)
-  app.stage.addChild(overlayLayer)
+  world.addChild(terrainLayer)
+  world.addChild(overlayLayer)
+  app.stage.addChild(world)
 
   app.stage.eventMode = 'static'
   app.stage.hitArea = app.screen
-  app.stage.on('pointertap', (event) => {
+  app.stage.on('wheel', (event) => {
     const local = event.getLocalPosition(app!.stage)
-    emit('hex-click', pixelToAxial(local.x, local.y, props.hexSize))
+    zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1, { x: local.x, y: local.y })
   })
+  app.stage.on('pointerdown', (event) => {
+    const p = event.getLocalPosition(app!.stage)
+    dragState = { startX: p.x, startY: p.y, originX: world!.position.x, originY: world!.position.y, moved: false }
+  })
+  app.stage.on('globalpointermove', (event) => {
+    if (!dragState || !world) return
+    const p = event.getLocalPosition(app!.stage)
+    const dx = p.x - dragState.startX
+    const dy = p.y - dragState.startY
+    if (Math.hypot(dx, dy) > 4) dragState.moved = true
+    if (dragState.moved) {
+      userAdjustedView = true
+      world.position.set(dragState.originX + dx, dragState.originY + dy)
+    }
+  })
+  function handlePointerUp(x: number, y: number) {
+    if (dragState && !dragState.moved) {
+      const worldPoint = toWorld(x, y)
+      emit('hex-click', pixelToAxial(worldPoint.x, worldPoint.y, props.hexSize))
+    }
+    dragState = null
+  }
+  app.stage.on('pointerup', (event) => {
+    const p = event.getLocalPosition(app!.stage)
+    handlePointerUp(p.x, p.y)
+  })
+  app.stage.on('pointerupoutside', (event) => {
+    const p = event.getLocalPosition(app!.stage)
+    handlePointerUp(p.x, p.y)
+  })
+
+  resizeObserver = new ResizeObserver(() => {
+    if (!userAdjustedView) fitToView()
+  })
+  if (host.value) resizeObserver.observe(host.value)
 
   drawTerrain()
   drawOverlays()
+  fitToView()
 })
 
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   app?.destroy(true, { children: true })
   app = null
+  world = null
   terrainLayer = null
   overlayLayer = null
 })
 
-watch(() => props.map, drawTerrain, { deep: true })
+watch(() => props.map.cells, drawTerrain, { deep: true })
+watch(
+  () => props.map.id,
+  () => {
+    userAdjustedView = false
+    drawTerrain()
+    fitToView()
+  },
+)
 watch(() => props.overlays, drawOverlays, { deep: true })
 </script>
 
 <template>
-  <div ref="host" class="hex-grid"></div>
+  <div class="hex-grid-wrap">
+    <div ref="host" class="hex-grid"></div>
+    <div class="hex-grid-controls">
+      <button type="button" title="Zoom in" @click="zoomBy(1.25)">+</button>
+      <button type="button" title="Zoom out" @click="zoomBy(1 / 1.25)">−</button>
+      <button type="button" title="Fit and center" @click="recenter">⤢</button>
+    </div>
+  </div>
 </template>
 
 <style scoped>
+.hex-grid-wrap {
+  position: relative;
+  width: 100%;
+  height: min(75vh, 720px);
+}
 .hex-grid {
   width: 100%;
-  height: 480px;
+  height: 100%;
   border: 1px solid #444;
+  cursor: grab;
+}
+.hex-grid-controls {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.hex-grid-controls button {
+  width: 2rem;
+  height: 2rem;
+  line-height: 1;
+  cursor: pointer;
 }
 </style>
