@@ -504,33 +504,38 @@ through a completed run, chassis-type management UI (replacing the old hardcoded
 
 ## 8. Open questions (deferred, not blocking Phase 1)
 
-- Multiplayer (two humans, each ordering one side) vs. single-player-vs-AI vs. pure sandbox replay —
-  affects whether the WebSocket protocol needs auth/session separation per side.
+Resolved since this section was last written:
+- ~~Pluggable combat rule sets~~ — resolved by §3.7's `CombatResolver` trait + registry and §2.2's
+  individual/aggregate granularity split, landed end-to-end as the combat-resolver milestone (issues
+  #12–#17, tracked in #11). `old/`'s prior rule-system iterations were mined (#15) and confirmed to
+  have nothing reusable — both `aggregate_strength_v1` and `cepheus_vehicle_v1`'s numeric tables are
+  originated, not migrated, and explicitly marked placeholder pending #26's balance pass.
+- ~~Cycle prevention for `Organic` relationships~~ — implemented and tested in `UnitRelationshipRepo`
+  (issue #6): an `Organic` relationship that would make a unit its own ancestor is rejected before
+  insert; non-organic types aren't subject to the check, per §2.1's doctrinal-effects table.
+
+Still open, now tracked as individual issues rather than bullets here:
+- Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
+  protocol's auth/session model — #32.
 - Map size ceiling and whether SVG rendering holds up, or a Canvas/PixiJS rewrite of `HexGrid.vue`
-  becomes necessary — defer until Phase 3 gives real hex counts to benchmark against.
-- Pluggable combat rule sets: resolved by §3.7's `CombatResolver` trait + registry and §2.2's
-  individual/aggregate granularity split. Still open: actually mining `old/`'s prior rule-system
-  iterations (USMF I–VI, `harsh_realm_tables.xlsx`, `system_control_tables.xlsx`, etc.) for reusable
-  data before authoring `cepheus_vehicle_v1`/`aggregate_strength_v1` from scratch — worth a skim
-  before Phase 4 locks in the first two resolvers' actual numbers.
-- Cycle prevention for `Organic` relationships: nothing yet stops a unit from organically reporting
-  to its own descendant. Not a problem for the non-command relationship types (a unit can be
-  Attached/OPCON in a loop-free way even if graph cycles are technically representable), but the
-  permanent TO&E tree specifically needs to stay acyclic — needs a validation pass before the Unit
-  Designer's attach/detach UI ships in Phase 2.
-- UI for editing `relationship_type_specs` itself (adding a custom relationship type beyond the
-  seeded six) — deferred to whenever a real use case for a custom type shows up, per section 2.1.
-- `max_action_points`/`attack_ap_cost` (§3.3) are currently flat per-combatant values passed into
-  `CombatantState` directly, not derived from Component/Asset/PersonnelType stats the way weapon
-  range/damage/initiative already are. Wiring an `action_points` (or similar) Component stat through
-  the same loadout-totals mechanism is the natural next step once there's real Asset/PersonnelType
-  data to derive it from (Phase 2 issues).
-- The default AI (§3.2) is a one-line heuristic (attack if in range, else advance, else pass) with no
-  concept of standing orders, rules of engagement, or unit-specific doctrine. A richer
-  orders/behavior system (and the "commander sets objectives, AI executes them" framing from the
-  original ask) is real future work, not represented in the engine yet — the override mechanism
-  covers "player wants direct control of this unit this round" but not "player wants to steer AI
-  behavior without micromanaging every turn."
+  becomes necessary — #31 (blocked on Phase 3 landing first).
+- UI for editing `relationship_type_specs` itself (a custom relationship type beyond the seeded six)
+  — #30.
+- `max_action_points`/`attack_ap_cost`/weapon stats/`hit_points` are still flat per-combatant values
+  (`usmf-sim::spawn::CombatDefaults`), not derived from Component/Asset/PersonnelType stats the way
+  weapon range/damage/initiative already are for `cepheus_vehicle_v1`'s armor/hull/weapon data (#17)
+  — #24.
+- The default AI (§3.2) is a one-line heuristic with no standing orders/rules-of-engagement/doctrine
+  concept — #29.
 - To-hit (§3.3) is still a simple range-scaled chance with no cover, suppression, or elevation
   modifiers — the `TerrainType::cover_bonus()` value already exists on the Map model (§2.2) but isn't
-  read by combat resolution yet.
+  read by combat resolution yet. Folded into #28 alongside the rest of the Cepheus material that
+  didn't make it into the #11 milestone (spotting, movement/drive checks, chases, ramming, autofire,
+  HE burst radius).
+
+New since the #11 milestone closed:
+- The Component Damage Table (per-crew/per-subsystem hit effects) — `AttackOutcome::IndividualHit`'s
+  `component_effects` field exists but stays empty until per-vehicle crew/subsystem tracking is
+  designed — #25.
+- Every `CombatResolver` only depletes the defender's pool; whether attacker-side losses (a standard
+  CRT mechanic) are wanted at all is an open design decision — #27.
