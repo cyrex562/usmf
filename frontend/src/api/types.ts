@@ -165,6 +165,8 @@ export interface UnitRollup {
   personnel_headcount: number
   daily_supply_consumption: number
   capabilities: Record<string, number>
+  combat_profiles: Record<string, Record<string, number>>
+  hit_points: number
   span_of_control_warnings: string[]
 }
 
