@@ -20,7 +20,7 @@ pub use personnel::{
     PersonnelValidation,
 };
 pub use ruleset::{merge_combat_profiles, numeric_fields, CombatProfile, RulesetSpec};
-pub use scenario::{Scenario, ScenarioForce, StartPosition};
+pub use scenario::{Granularity, Scenario, ScenarioForce, StartPosition};
 pub use unit::{
     base_initiative, effective_subtree_unit_ids, rollup_unit, FormationKind, PersonnelComposition,
     RelationshipRules, RelationshipTypeSpec, Unit, UnitAsset, UnitPersonnelEntry, UnitRelationship,

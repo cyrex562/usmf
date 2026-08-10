@@ -18,6 +18,20 @@ pub type RulesetId = String;
 /// into a more specific ruleset.
 pub const LEGACY_LINEAR_V1: &str = "legacy_linear_v1";
 
+/// The id `aggregate_strength_v1` (issue #16) will register under, booked
+/// ahead of time so `crate::spawn` can point `Aggregate`-granularity
+/// combatants at it now instead of leaving them on `legacy_linear_v1`. No
+/// resolver is registered for it yet -- an attack against one of these
+/// combatants surfaces as an `ActionBlocked` "no CombatResolver registered"
+/// event (`engine::apply_action`) until #16 lands.
+pub const AGGREGATE_STRENGTH_V1: &str = "aggregate_strength_v1";
+
+/// The id `cepheus_vehicle_v1` (issue #17) will register under -- same
+/// forward-reference reasoning as `AGGREGATE_STRENGTH_V1`, for
+/// `Individual`-granularity combatants whose Component data has a
+/// `cepheus_vehicle_v1` entry.
+pub const CEPHEUS_VEHICLE_V1: &str = "cepheus_vehicle_v1";
+
 /// Read-only context an attack is resolved against. Currently just the range
 /// the Attack action already computed before dispatching to a resolver --
 /// kept as its own struct (rather than passing extra scalars alongside
@@ -148,11 +162,12 @@ pub fn default_registry() -> ResolverRegistry {
 mod tests {
     use super::*;
     use crate::rng::round_rng;
-    use usmf_core::HexCoord;
+    use usmf_core::{Granularity, HexCoord};
 
     fn combatant(ruleset_id: &str) -> CombatantState {
         CombatantState {
-            unit_id: 1,
+            combatant_id: 1,
+            source_unit_id: 1,
             side: "blue".to_string(),
             position: HexCoord::new(0, 0),
             base_initiative: 0.0,
@@ -164,6 +179,8 @@ mod tests {
             hit_points: 100.0,
             destroyed: false,
             ruleset_id: ruleset_id.to_string(),
+            granularity: Granularity::Individual,
+            strength_points: None,
         }
     }
 
