@@ -7,12 +7,12 @@ use axum::Json;
 use serde::Deserialize;
 use usmf_core::{
     effective_subtree_unit_ids, rollup_unit, validate_asset, validate_personnel_loadout, Asset,
-    AssetComponent, ChassisSpec, ComponentStats, ComponentType, FormationKind,
+    AssetComponent, ChassisSpec, ComponentStats, ComponentType, FormationKind, HexCell, Map,
     PersonnelComposition, PersonnelLoadoutItem, PersonnelType, RelationshipRules,
     RelationshipTypeSpec, Unit, UnitAsset, UnitType,
 };
 use usmf_db::{
-    AssetRepo, ChassisSpecRepo, ComponentRepo, CreateRelationshipError, PersonnelTypeRepo,
+    AssetRepo, ChassisSpecRepo, ComponentRepo, CreateRelationshipError, MapRepo, PersonnelTypeRepo,
     UnitRelationshipRepo, UnitRepo,
 };
 
@@ -665,6 +665,86 @@ pub async fn detach_relationship(
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!(%err, "failed to detach relationship");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Phase 3 (design_doc.md §4.2/§7, issue #31): Maps persist through
+/// `usmf-db::MapRepo` the same way every other design-time entity does --
+/// `MapEditor.vue` calls this to load the picker list, then `GET`/`PUT` a
+/// single map to load/save its full cell grid.
+pub async fn list_maps(State(state): State<AppState>) -> impl IntoResponse {
+    let repo = MapRepo::new(&state.pool);
+    match repo.list().await {
+        Ok(maps) => Json(maps).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to list maps");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn get_map(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let repo = MapRepo::new(&state.pool);
+    match repo.get(id).await {
+        Ok(Some(map)) => Json(map).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to fetch map");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpsertMapRequest {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub cells: Vec<HexCell>,
+}
+
+impl UpsertMapRequest {
+    fn into_map(self, id: i64) -> Map {
+        Map {
+            id,
+            name: self.name,
+            width: self.width,
+            height: self.height,
+            cells: self.cells,
+        }
+    }
+}
+
+pub async fn create_map(
+    State(state): State<AppState>,
+    Json(body): Json<UpsertMapRequest>,
+) -> impl IntoResponse {
+    let repo = MapRepo::new(&state.pool);
+    let map = body.into_map(0);
+    match repo.create(&map).await {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to create map");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn update_map(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpsertMapRequest>,
+) -> impl IntoResponse {
+    let repo = MapRepo::new(&state.pool);
+    let map = body.into_map(id);
+    match repo.update(id, &map).await {
+        Ok(true) => Json(serde_json::json!({ "id": id })).into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "failed to update map");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

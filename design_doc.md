@@ -580,10 +580,17 @@ frontend/src/
     simSocket.ts               # WebSocket client for live sim state
 ```
 
-Map rendering: plain SVG with hand-rolled axial-hex math to start (a tactical map of a few hundred
-hexes doesn't need WebGL). `HexGrid.vue` takes a `Map` + per-hex `UnitState` overlay and renders
-both the Map Editor and the Simulation Viewer, since they're the same rendering problem with
-different edit affordances layered on top.
+Map rendering: Canvas via PixiJS (issue #31), not plain SVG — decided outright rather than benchmarked,
+because the deciding factor turned out not to be raw hex-count performance but what both `HexGrid.vue`
+consumers actually need to draw on top of the terrain: unit markers, movement paths, LOS lines, range
+rings, and eventually real MIL-STD-2525/APP-6 unit symbology (tracked separately). That's a vector/
+shape-drawing problem PixiJS's retained-mode `Graphics`/`Container` scene graph is built for, at a
+scene-graph cost SVG's one-DOM-node-per-element model doesn't match once a simulation run's overlay
+count grows across many hexes and many combatants. `HexGrid.vue` takes a `Map` plus a generic
+`HexOverlayShape[]` (marker/ring/line today, extensible to a `symbol` kind once unit symbology lands)
+and renders both the Map Editor and the Simulation Viewer, since they're the same rendering problem
+with different edit affordances layered on top — `MapEditor.vue` (Phase 3) is built against it now;
+`SimulationViewer.vue` (Phase 4) reuses the same component once that phase starts.
 
 ### 4.3 Data flow
 
@@ -643,10 +650,12 @@ tree, own-composition editor, and an attach/detach panel for non-organic `UnitRe
 functional parity with V2 plus the relationship model from section 2.1, real Rust logic instead of
 dummy stats.
 
-**Phase 3 — Map.** Map Editor (hex terrain painting) and the `usmf-db`/`usmf-api` layer for Maps.
-Hex math, A* pathfinding, and LOS are already implemented and unit-tested in `usmf-sim` ahead of
-this phase (`usmf-sim::pathfinding`, `usmf-sim::los`) — this phase is mainly the persistence/UI
-around them.
+**Phase 3 — Map. Done (issue #31).** Map Editor (hex terrain painting) and the `usmf-db`/`usmf-api`
+layer for Maps — `MapRepo` (create/get/list/update, full cell-grid round-trip), `/api/maps` routes,
+and `MapEditor.vue` painting real terrain through the new PixiJS-based `HexGrid.vue` (§4.2). Hex
+math, A* pathfinding, and LOS were already implemented and unit-tested in `usmf-sim` ahead of this
+phase (`usmf-sim::pathfinding`, `usmf-sim::los`) — this phase was mainly the persistence/UI around
+them, plus settling the rendering technology (SVG vs. Canvas/PixiJS) issue #31 held open.
 
 **Phase 4 — Scenario & Simulation.** Scenario Editor (force placement on a Map), the
 `usmf-db`/`usmf-api` layer for Scenarios/SimulationRuns, Simulation Viewer with step/play and event
@@ -698,13 +707,20 @@ Resolved since this section was last written:
   out of this first vocabulary (nothing on `CombatantState` to filter by yet). Implementation tracked
   separately (#50).
 
+- ~~UI for editing `relationship_type_specs` itself (a custom relationship type beyond the seeded
+  six)~~ — implemented (#30, PR #52): `POST /api/relationship-types` + `RelationshipTypeLibrary.vue`
+  (`/relationship-types`), mirroring `ComponentLibrary.vue`'s CRUD pattern. Verified live in-browser.
+- ~~Map size ceiling and whether SVG rendering holds up, or a Canvas/PixiJS rewrite of `HexGrid.vue`
+  becomes necessary~~ — decided outright rather than benchmarked (#31, see §4.2): Canvas via PixiJS,
+  driven by overlay/graphics needs (unit markers, paths, LOS lines, range rings, future MIL-STD-2525/
+  APP-6 symbology — tracked separately) rather than raw hex-count performance. Landed as part of
+  Phase 3 (§7): `MapRepo`/`/api/maps` persistence, `HexGrid.vue`, and a real `MapEditor.vue` painting
+  terrain against it, verified live in-browser including the overlay-shape rendering path.
+
 Still open, now tracked as individual issues rather than bullets here:
 - Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
   protocol's auth/session model — #32.
-- Map size ceiling and whether SVG rendering holds up, or a Canvas/PixiJS rewrite of `HexGrid.vue`
-  becomes necessary — #31 (blocked on Phase 3 landing first).
-- UI for editing `relationship_type_specs` itself (a custom relationship type beyond the seeded six)
-  — #30.
+- MIL-STD-2525/APP-6 unit symbology for the overlay layer §4.2's `HexGrid.vue` now supports — #53.
 - ~~To-hit (§3.3) was still a simple range-scaled chance with no cover, suppression, or elevation
   modifiers~~ — design settled (#28, see §3.8): terrain modifiers extend `CombatContext`, each
   resolver folds them in independently. Spotting/movement checks/suppression/autofire/HE/ramming all
