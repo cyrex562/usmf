@@ -4,7 +4,7 @@ use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use usmf_core::{Granularity, HexCoord, Map};
 
-use crate::combat::{AttackOutcome, CombatContext, ResolverRegistry, RulesetId};
+use crate::combat::{AttackOutcome, CepheusWeapon, CombatContext, ResolverRegistry, RulesetId};
 use crate::los::has_line_of_sight;
 use crate::pathfinding::{find_path, path_cost};
 
@@ -56,10 +56,26 @@ pub struct CombatantState {
     /// Aggregate-granularity strength-point pool, seeded from the placed
     /// Unit's rolled-up combat power (`crate::spawn`). `None` for
     /// `Individual`-granularity combatants, which fight off `hit_points`
-    /// instead -- not yet depleted by the engine either way until
-    /// `aggregate_strength_v1` (#16) lands (see `AttackOutcome::AggregateHit`
-    /// handling below).
+    /// (or, under `cepheus_vehicle_v1`, `hull_points`/`structure_points`)
+    /// instead. Depleted by `AttackOutcome::AggregateHit` (`aggregate_strength_v1`,
+    /// #16) below.
     pub strength_points: Option<f64>,
+    /// `cepheus_vehicle_v1` (#17) defender pools: current armor, Hull
+    /// Points, and Structure Points. All three ride the existing
+    /// `CombatProfile` rollup (they're plain numbers, unlike `weapon` below)
+    /// -- populated at expansion time (`crate::spawn`) from whichever
+    /// Component contributed `cepheus_vehicle_v1` data. `None` for any
+    /// combatant not using that ruleset.
+    pub armor: Option<f64>,
+    pub hull_points: Option<f64>,
+    pub structure_points: Option<f64>,
+    /// `cepheus_vehicle_v1` (#17) attacker data: the specific weapon this
+    /// combatant fires with. Per-component, not summable (`CepheusWeapon`'s
+    /// doc comment), so unlike `armor`/`hull_points` it isn't part of the
+    /// rolled-up `CombatProfile` -- `crate::spawn` threads it through
+    /// separately. `None` for any combatant not using that ruleset, or with
+    /// no weapon Component carrying `cepheus_vehicle_v1` data.
+    pub weapon: Option<CepheusWeapon>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,20 +317,14 @@ fn apply_action(
                 AttackOutcome::Miss => (false, 0.0),
                 AttackOutcome::LegacyHit { damage } => (true, *damage),
                 AttackOutcome::AggregateHit { strength_lost } => (true, *strength_lost as f64),
-                // #17 lands the resolver that produces this, and the
-                // per-vehicle hull/structure pools it deplete -- surface as
-                // a blocked action rather than silently dropping the damage
-                // or guessing a translation into hit_points.
-                AttackOutcome::IndividualHit { .. } => {
-                    events.push(RoundEvent::ActionBlocked {
-                        combatant_id,
-                        reason: format!(
-                            "ruleset '{}' outcome not yet applied by the engine",
-                            target.ruleset_id
-                        ),
-                    });
-                    return false;
-                }
+                // Total points of damage dealt across both pools, for the
+                // event log -- actual per-pool application happens below,
+                // where hull_lost/structure_lost are applied individually.
+                AttackOutcome::IndividualHit {
+                    hull_lost,
+                    structure_lost,
+                    ..
+                } => (true, (*hull_lost + *structure_lost) as f64),
             };
 
             if let Some(attacker_state) = states.get_mut(&combatant_id) {
@@ -332,16 +342,37 @@ fn apply_action(
 
             if hit {
                 if let Some(target_state) = states.get_mut(&target_combatant_id) {
-                    // Aggregate combatants fight off strength_points, not
-                    // hit_points (design_doc.md §2.2) -- deplete whichever
-                    // pool this outcome actually represents.
-                    let destroyed_now = if matches!(outcome, AttackOutcome::AggregateHit { .. }) {
-                        let remaining = target_state.strength_points.unwrap_or(0.0) - damage;
-                        target_state.strength_points = Some(remaining);
-                        remaining <= 0.0
-                    } else {
-                        target_state.hit_points -= damage;
-                        target_state.hit_points <= 0.0
+                    // Each granularity/ruleset fights off its own pool
+                    // (design_doc.md §2.2) -- deplete whichever one this
+                    // outcome actually represents. `cepheus_vehicle_v1`
+                    // (#17): Hull Points reaching 0 is "Knocked Out," not
+                    // destroyed -- it can still be hit again, spilling
+                    // further damage into Structure Points -- so only
+                    // Structure Points reaching 0 destroys it.
+                    let destroyed_now = match &outcome {
+                        AttackOutcome::AggregateHit { .. } => {
+                            let remaining = target_state.strength_points.unwrap_or(0.0) - damage;
+                            target_state.strength_points = Some(remaining);
+                            remaining <= 0.0
+                        }
+                        AttackOutcome::IndividualHit {
+                            hull_lost,
+                            structure_lost,
+                            ..
+                        } => {
+                            let hull_remaining = (target_state.hull_points.unwrap_or(0.0)
+                                - *hull_lost as f64)
+                                .max(0.0);
+                            target_state.hull_points = Some(hull_remaining);
+                            let structure_remaining = target_state.structure_points.unwrap_or(0.0)
+                                - *structure_lost as f64;
+                            target_state.structure_points = Some(structure_remaining);
+                            structure_remaining <= 0.0
+                        }
+                        _ => {
+                            target_state.hit_points -= damage;
+                            target_state.hit_points <= 0.0
+                        }
                     };
                     if destroyed_now && !target_state.destroyed {
                         target_state.destroyed = true;
@@ -418,7 +449,10 @@ fn truncate_path_to_budget(map: &Map, path: &[HexCoord], budget: u32) -> Vec<Hex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::{default_registry, AGGREGATE_STRENGTH_V1, LEGACY_LINEAR_V1};
+    use crate::combat::{
+        default_registry, CepheusDamageType, AGGREGATE_STRENGTH_V1, CEPHEUS_VEHICLE_V1,
+        LEGACY_LINEAR_V1,
+    };
     use crate::rng::round_rng;
     use usmf_core::{HexCell, TerrainType};
 
@@ -464,6 +498,10 @@ mod tests {
             ruleset_id: LEGACY_LINEAR_V1.to_string(),
             granularity: Granularity::Individual,
             strength_points: None,
+            armor: None,
+            hull_points: None,
+            structure_points: None,
+            weapon: None,
         }
     }
 
@@ -684,5 +722,85 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    fn cepheus_weapon() -> CepheusWeapon {
+        CepheusWeapon {
+            dice_count: 6,
+            dice_sides: 6,
+            damage_type: CepheusDamageType::Sap,
+        }
+    }
+
+    #[test]
+    fn cepheus_individual_knocked_out_but_not_destroyed_spills_to_structure() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        // Same hex (range 0) for a guaranteed hit, matching the resolver's
+        // own deterministic-Miss/-Hit tests in combat::tests. 6D6's minimum
+        // roll is 6, always > 0 armor, so this is always an IndividualHit.
+        let mut attacker = combatant(1, "blue", HexCoord::new(0, 0), 100.0);
+        attacker.weapon = Some(cepheus_weapon());
+        states.insert(1, attacker);
+
+        let mut defender = combatant(2, "red", HexCoord::new(0, 0), 0.0);
+        defender.ruleset_id = CEPHEUS_VEHICLE_V1.to_string();
+        defender.granularity = Granularity::Individual;
+        defender.armor = Some(0.0);
+        defender.hull_points = Some(1.0);
+        // 25 is the highest possible table bracket, so 30 always survives
+        // regardless of how much of the roll spills past hull_points.
+        defender.structure_points = Some(30.0);
+        states.insert(2, defender);
+
+        let registry = default_registry();
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
+
+        assert_eq!(states[&2].hull_points, Some(0.0));
+        assert!(
+            states[&2].structure_points.unwrap() < 30.0,
+            "overflow past Hull Points should have spilled into Structure Points"
+        );
+        assert!(!states[&2].destroyed, "Knocked Out is not Destroyed");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RoundEvent::AttackResolved {
+                attacker_combatant_id: 1,
+                target_combatant_id: 2,
+                hit: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn cepheus_individual_destroyed_when_structure_points_reach_zero() {
+        let map = flat_map(10, 1);
+        let mut states = HashMap::new();
+        let mut attacker = combatant(1, "blue", HexCoord::new(0, 0), 100.0);
+        attacker.weapon = Some(cepheus_weapon());
+        states.insert(1, attacker);
+
+        let mut defender = combatant(2, "red", HexCoord::new(0, 0), 0.0);
+        defender.ruleset_id = CEPHEUS_VEHICLE_V1.to_string();
+        defender.granularity = Granularity::Individual;
+        defender.armor = Some(0.0);
+        // Already Knocked Out (Hull Points at 0) from some earlier hit, and
+        // Structure Points too low to survive any further nonzero hit --
+        // the guaranteed penetration (armor 0) always destroys it here.
+        defender.hull_points = Some(0.0);
+        defender.structure_points = Some(1.0);
+        states.insert(2, defender);
+
+        let registry = default_registry();
+        let mut rng = round_rng(1, 1);
+        let events = resolve_round(&map, &mut states, &HashMap::new(), &registry, &mut rng);
+
+        assert!(states[&2].structure_points.unwrap() <= 0.0);
+        assert!(states[&2].destroyed);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RoundEvent::UnitDestroyed { combatant_id: 2 })));
     }
 }

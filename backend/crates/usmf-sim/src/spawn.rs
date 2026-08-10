@@ -1,12 +1,25 @@
 use std::collections::HashMap;
 
 use usmf_core::{
-    base_initiative, rollup_unit, AssetTotals, Granularity, HexCoord, PersonnelComposition,
-    PersonnelTotals, Unit,
+    base_initiative, rollup_unit, AssetTotals, CombatProfile, Granularity, HexCoord,
+    PersonnelComposition, PersonnelTotals, Unit,
 };
 
-use crate::combat::{AGGREGATE_STRENGTH_V1, CEPHEUS_VEHICLE_V1, LEGACY_LINEAR_V1};
+use crate::combat::{CepheusWeapon, AGGREGATE_STRENGTH_V1, CEPHEUS_VEHICLE_V1, LEGACY_LINEAR_V1};
 use crate::engine::CombatantState;
+
+/// Per-weapon `cepheus_vehicle_v1` (#17) attack data, keyed by whichever
+/// Asset/PersonnelType carries it. `CepheusWeapon` is per-component,
+/// non-summable data (see its doc comment) that can't ride the existing
+/// `CombatProfile` rollup the way `armor`/`hull_points` do -- callers
+/// assemble this once from real Asset/Component data, the same way
+/// `asset_totals`/`personnel_totals` are pre-assembled rollups rather than
+/// raw rows `expand_placement` looks up itself.
+#[derive(Debug, Clone, Default)]
+pub struct WeaponProfiles {
+    pub assets: HashMap<i64, CepheusWeapon>,
+    pub personnel: HashMap<i64, CepheusWeapon>,
+}
 
 /// Threshold (in expanded-instance count, `instance_count`) above which a
 /// placement defaults to `Aggregate` granularity when the scenario doesn't
@@ -86,6 +99,22 @@ fn individual_ruleset_id(totals: &usmf_core::LoadoutTotals) -> String {
     }
 }
 
+/// Pulls `cepheus_vehicle_v1`'s three plain-number fields out of a rolled-up
+/// `CombatProfile` -- these ride the existing rollup (unlike `CepheusWeapon`,
+/// see `WeaponProfiles`) because they're summable, ordinary numbers, the
+/// same as `armor`/`hull_points`/`structure_points`. `"armor"` is a single
+/// value per vehicle, not faceted by firing arc -- the simplest option that
+/// doesn't require the engine to model a facing/angle concept it doesn't
+/// have yet.
+fn cepheus_numeric_fields(profile: &CombatProfile) -> (Option<f64>, Option<f64>, Option<f64>) {
+    (
+        profile.get("armor").copied(),
+        profile.get("hull_points").copied(),
+        profile.get("structure_points").copied(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn combatant_from_totals(
     id: i64,
     source_unit_id: i64,
@@ -93,8 +122,14 @@ fn combatant_from_totals(
     position: HexCoord,
     base_initiative: f64,
     ruleset_id: String,
+    profile: Option<&CombatProfile>,
+    weapon: Option<CepheusWeapon>,
     defaults: CombatDefaults,
 ) -> CombatantState {
+    let (armor, hull_points, structure_points) = profile
+        .map(cepheus_numeric_fields)
+        .unwrap_or((None, None, None));
+
     CombatantState {
         combatant_id: id,
         source_unit_id,
@@ -111,6 +146,10 @@ fn combatant_from_totals(
         ruleset_id,
         granularity: Granularity::Individual,
         strength_points: None,
+        armor,
+        hull_points,
+        structure_points,
+        weapon,
     }
 }
 
@@ -129,6 +168,7 @@ fn combatant_from_totals(
 ///   per-instance stats from) don't produce individual combatants -- a unit
 ///   placed `Individual` with only `Simplified` personnel expands to just
 ///   its own_assets' instances, if any.
+#[allow(clippy::too_many_arguments)]
 pub fn expand_placement(
     unit: &Unit,
     side: &str,
@@ -136,6 +176,7 @@ pub fn expand_placement(
     granularity: Granularity,
     asset_totals: &HashMap<i64, AssetTotals>,
     personnel_totals: &HashMap<i64, PersonnelTotals>,
+    weapons: &WeaponProfiles,
     defaults: CombatDefaults,
 ) -> Vec<CombatantState> {
     let initiative = base_initiative(unit, asset_totals, personnel_totals);
@@ -164,6 +205,8 @@ pub fn expand_placement(
                 position,
                 initiative,
                 AGGREGATE_STRENGTH_V1.to_string(),
+                None,
+                None,
                 defaults,
             );
             combatant.granularity = Granularity::Aggregate;
@@ -179,6 +222,8 @@ pub fn expand_placement(
                     continue;
                 };
                 let ruleset_id = individual_ruleset_id(totals);
+                let profile = totals.combat_profiles.get(CEPHEUS_VEHICLE_V1);
+                let weapon = weapons.assets.get(&owned.asset_id).copied();
                 for _ in 0..owned.quantity {
                     instances.push(combatant_from_totals(
                         combatant_id(unit.id, index),
@@ -187,6 +232,8 @@ pub fn expand_placement(
                         position,
                         initiative,
                         ruleset_id.clone(),
+                        profile,
+                        weapon,
                         defaults,
                     ));
                     index += 1;
@@ -199,6 +246,8 @@ pub fn expand_placement(
                         continue;
                     };
                     let ruleset_id = individual_ruleset_id(totals);
+                    let profile = totals.combat_profiles.get(CEPHEUS_VEHICLE_V1);
+                    let weapon = weapons.personnel.get(&entry.personnel_type_id).copied();
                     for _ in 0..entry.quantity {
                         instances.push(combatant_from_totals(
                             combatant_id(unit.id, index),
@@ -207,6 +256,8 @@ pub fn expand_placement(
                             position,
                             initiative,
                             ruleset_id.clone(),
+                            profile,
+                            weapon,
                             defaults,
                         ));
                         index += 1;
@@ -222,6 +273,7 @@ pub fn expand_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::CepheusDamageType;
     use std::collections::HashMap;
     use usmf_core::{
         FormationKind, PersonnelComposition, PersonnelTotals, UnitAsset, UnitPersonnelEntry,
@@ -307,6 +359,7 @@ mod tests {
             Granularity::Aggregate,
             &asset_totals,
             &HashMap::new(),
+            &WeaponProfiles::default(),
             defaults(),
         );
 
@@ -329,11 +382,26 @@ mod tests {
             AssetTotals {
                 combat_profiles: HashMap::from([(
                     CEPHEUS_VEHICLE_V1.to_string(),
-                    HashMap::from([("armor_front".to_string(), 40.0)]),
+                    HashMap::from([
+                        ("armor".to_string(), 40.0),
+                        ("hull_points".to_string(), 20.0),
+                        ("structure_points".to_string(), 10.0),
+                    ]),
                 )]),
                 ..Default::default()
             },
         );
+        let weapons = WeaponProfiles {
+            assets: HashMap::from([(
+                10,
+                CepheusWeapon {
+                    dice_count: 6,
+                    dice_sides: 6,
+                    damage_type: CepheusDamageType::Sap,
+                },
+            )]),
+            personnel: HashMap::new(),
+        };
 
         let combatants = expand_placement(
             &unit,
@@ -342,6 +410,7 @@ mod tests {
             Granularity::Individual,
             &asset_totals,
             &HashMap::new(),
+            &weapons,
             defaults(),
         );
 
@@ -354,6 +423,10 @@ mod tests {
             assert_eq!(combatant.source_unit_id, unit.id);
             assert_eq!(combatant.ruleset_id, CEPHEUS_VEHICLE_V1);
             assert_eq!(combatant.strength_points, None);
+            assert_eq!(combatant.armor, Some(40.0));
+            assert_eq!(combatant.hull_points, Some(20.0));
+            assert_eq!(combatant.structure_points, Some(10.0));
+            assert!(combatant.weapon.is_some());
         }
     }
 
@@ -370,10 +443,13 @@ mod tests {
             Granularity::Individual,
             &asset_totals,
             &HashMap::new(),
+            &WeaponProfiles::default(),
             defaults(),
         );
 
         assert_eq!(combatants[0].ruleset_id, LEGACY_LINEAR_V1);
+        assert_eq!(combatants[0].armor, None);
+        assert!(combatants[0].weapon.is_none());
     }
 
     #[test]
@@ -397,6 +473,7 @@ mod tests {
             Granularity::Individual,
             &asset_totals,
             &personnel_totals,
+            &WeaponProfiles::default(),
             defaults(),
         );
 
@@ -418,11 +495,75 @@ mod tests {
             Granularity::Individual,
             &asset_totals,
             &HashMap::new(),
+            &WeaponProfiles::default(),
             defaults(),
         );
 
         // Only the one asset instance -- no PersonnelType to derive the 50
         // Simplified personnel's individual stats from.
         assert_eq!(combatants.len(), 1);
+    }
+
+    #[test]
+    fn individual_placement_threads_personnel_weapon_profile() {
+        let unit = Unit {
+            id: 1,
+            name: "unit-1".to_string(),
+            unit_type: UnitType::Line,
+            formation_kind: FormationKind::Standing,
+            own_assets: vec![],
+            personnel: PersonnelComposition::Detailed {
+                entries: vec![UnitPersonnelEntry {
+                    personnel_type_id: 20,
+                    quantity: 1,
+                }],
+            },
+            c2_capacity: None,
+        };
+        let mut personnel_totals = HashMap::new();
+        personnel_totals.insert(
+            20,
+            PersonnelTotals {
+                combat_profiles: HashMap::from([(
+                    CEPHEUS_VEHICLE_V1.to_string(),
+                    HashMap::from([("armor".to_string(), 5.0)]),
+                )]),
+                ..Default::default()
+            },
+        );
+        let weapons = WeaponProfiles {
+            assets: HashMap::new(),
+            personnel: HashMap::from([(
+                20,
+                CepheusWeapon {
+                    dice_count: 3,
+                    dice_sides: 6,
+                    damage_type: CepheusDamageType::Ap(2),
+                },
+            )]),
+        };
+
+        let combatants = expand_placement(
+            &unit,
+            "blue",
+            HexCoord::new(0, 0),
+            Granularity::Individual,
+            &HashMap::new(),
+            &personnel_totals,
+            &weapons,
+            defaults(),
+        );
+
+        assert_eq!(combatants.len(), 1);
+        assert_eq!(combatants[0].ruleset_id, CEPHEUS_VEHICLE_V1);
+        assert_eq!(combatants[0].armor, Some(5.0));
+        assert_eq!(
+            combatants[0].weapon,
+            Some(CepheusWeapon {
+                dice_count: 3,
+                dice_sides: 6,
+                damage_type: CepheusDamageType::Ap(2),
+            })
+        );
     }
 }
