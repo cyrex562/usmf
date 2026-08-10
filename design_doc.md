@@ -293,8 +293,8 @@ actions" — until AP runs out, an action fails to apply, or the combatant expli
   `CombatResolver` (§3.7) — to-hit and damage math live entirely inside that resolver, not in the
   Attack action itself. Today's linear-range-scaled hit chance against a flat `hit_points` pool
   becomes the `legacy_linear_v1` resolver (the only one registered until §3.7's granular/aggregate
-  rulesets land); cover/suppression modifiers are a per-resolver concern, not wired into any
-  resolver yet (§8).
+  rulesets land); cover/suppression modifiers are a per-resolver concern (confirmed by §3.8's design
+  pass), not wired into any resolver yet.
 - **Use ability** — not yet implemented; the `Action` enum has room to grow (abilities tied to a
   unit's `capabilities` tags from §2.1, e.g. an "indirect_fire" capability unlocking an indirect-fire
   action) once there's a concrete ability to build against.
@@ -327,6 +327,76 @@ same overrides in, same events out: needed for a usable replay/event log.
 The client drives pacing: submit this round's overrides (if any) and call `step` to resolve one round
 (like V2's `/api/simulations/{id}/step`, now resolving a round instead of a WEGO turn), or request
 auto-play where the server steps on a timer and pushes each round's events over WebSocket — see §5.
+
+### 3.8 Cepheus vehicle-combat mechanics, phase 2 (design settled by #28)
+
+The original `cepheus_vehicle_v1` design conversation covered more than the penetration pipeline
+(§3.7): spotting, movement/drive checks, terrain/cover/elevation to-hit modifiers, suppression,
+autofire, HE burst radius, ramming, and chases/dogfights. All were scoped out of the combat-resolver
+milestone (#11) as "a second full pass once the Hull/Structure/Armor core is in." This section is
+that pass's structural answers — implementation is tracked issue-by-issue (see the end of this
+section), not landed here.
+
+**Where each mechanic hooks in**, and why: `engine::apply_action`'s `Attack` arm already has exactly
+one chokepoint every attack passes through — the range/LOS gate, right before `CombatContext` is
+built and handed to the resolver — and its `Move` arm already threads the same round-seeded
+`ChaCha8Rng` used for to-hit rolls (§3.5) without yet using it for anything. Every mechanic below
+reuses one of these two existing hooks rather than inventing new ones, the same way `cover_bonus()`'s
+own doc comment and §3.3's existing "cover/suppression modifiers are a per-resolver concern" note
+already anticipated:
+
+- **Spotting** — a new precondition alongside the existing LOS check, not a new `Action` variant or
+  persistent per-combatant "spotted" state. Recomputed fresh on every `Attack` attempt, the same way
+  `has_line_of_sight` already is, rather than cached across rounds — the smallest addition consistent
+  with how LOS already works, not the richer "spend AP to spot, stays spotted" alternative (that's a
+  bigger follow-up if playtesting shows it's needed). Individual-granularity `cepheus_vehicle_v1`
+  combatants only (see granularity note below).
+- **Movement/drive checks** — a new roll inside the `Move` arm, gated on the path's terrain
+  difficulty, using the AP-debiting logic that's already there. Individual-granularity vehicles only
+  — a "drive check" is a specific vehicle/crew skill concept that doesn't apply to dismounted
+  personnel or to an abstracted strength-point stack.
+- **Terrain to-hit modifiers (cover, elevation)** — `CombatContext` gains new fields, populated at its
+  existing construction site (`engine.rs`, right before the resolver call) from `map.cell_at`, which
+  is already in scope there. Each resolver folds the new context into its own hit-chance math
+  independently (`legacy_linear_v1`/`cepheus_vehicle_v1` both already share `range_scaled_hit_chance`;
+  `aggregate_strength_v1` ignores `ctx` entirely today and can keep doing so) — a per-resolver
+  concern, not a shared global modifier-stacking system, matching `CombatContext`'s own doc comment
+  and §3.3's existing note. Applies to both granularities — cover protects whatever occupies a hex,
+  whether that's one vehicle or a whole stack.
+- **Suppression** — unlike cover/elevation, this needs genuinely new state (a level that
+  builds/decays over time), not just a read of existing static Map data — closer in weight to the
+  Component Damage Table (#25) than to the terrain-modifier bullet above. Tracked as its own
+  follow-up rather than bundled with cover/elevation.
+- **Autofire** — multiple damage rolls against the same single target within one `Attack` action;
+  still one attacker/one defender, so it extends `CepheusVehicleV1::resolve_attack`'s existing
+  single-pair shape rather than requiring a new dispatch mechanism.
+- **HE burst radius** — the one mechanic with no existing hook at all: every resolver, and the
+  `Attack` action itself, is hard-wired to exactly one attacker and one defender
+  (`target_combatant_id: i64`, not a hex or a list of targets). Needs either a new `Action` variant
+  (e.g. targeting a hex rather than a combatant) or a multi-defender resolution loop inside the
+  existing `Attack` arm — the largest structural change of this whole batch, and the one most likely
+  to need its own follow-up design pass once the others are built and the resolver-extension pattern
+  is proven out.
+- **Ramming** — a `Move`-into-an-occupied-hex-as-attack hybrid; combines both existing hooks rather
+  than needing a third.
+- **Chases/dogfights** — parked, not scoped. A sustained multi-round pursuer/evader relationship
+  (escape conditions, contested movement) is a different shape of mechanic from everything else in
+  this list, and nothing in the roadmap has called for a fast-mover/pursuit scenario yet (no
+  aircraft/naval concept exists anywhere in the domain model). Revisit if a concrete scenario need
+  shows up, the same treatment §8 already gives #31/#32.
+
+**Granularity**: `CombatantState`, `Action`, `apply_action`, `pathfinding`, and LOS are all already
+100% uniform across `Individual`/`Aggregate` — nothing in the engine branches on granularity today,
+so any new precondition applies to both by default unless a mechanic explicitly exempts one. Spotting
+and movement/drive checks are exempted for `Aggregate` above, following the same precedent §2.2's
+Component Damage Table decision (#25) already set: extra per-combatant texture piles onto
+`Individual` via new scalar/flag state, `Aggregate` stays coarse. Terrain modifiers apply to both,
+since they need no new per-combatant state to begin with.
+
+Implementation is tracked as a `#11`-style milestone (tracking issue + one sub-issue per mechanic),
+not one PR — the same reasoning §3.7's own resolvers used: each mechanic's actual numbers (spotting
+odds, drive-check DCs, cover-bonus-to-hit-chance formula, autofire's shot count, HE's damage falloff)
+still need their own origination and, per #26's precedent, their own balance pass once built.
 
 ### 3.7 Combat resolver architecture (pluggable rulesets)
 
@@ -591,9 +661,10 @@ Still open, now tracked as individual issues rather than bullets here:
   — #30.
 - The default AI (§3.2) is a one-line heuristic with no standing orders/rules-of-engagement/doctrine
   concept — #29.
-- To-hit (§3.3) is still a simple range-scaled chance with no cover, suppression, or elevation
-  modifiers — the `TerrainType::cover_bonus()` value already exists on the Map model (§2.2) but isn't
-  read by combat resolution yet. Folded into #28 alongside the rest of the Cepheus material that
-  didn't make it into the #11 milestone (spotting, movement/drive checks, chases, ramming, autofire,
-  HE burst radius) — a jam/breakdown/counter-fire concept for `cepheus_vehicle_v1`'s own version of
-  attacker-side risk (#27) is folded in here too, if ever picked up.
+- ~~To-hit (§3.3) was still a simple range-scaled chance with no cover, suppression, or elevation
+  modifiers~~ — design settled (#28, see §3.8): terrain modifiers extend `CombatContext`, each
+  resolver folds them in independently. Spotting/movement checks/suppression/autofire/HE/ramming all
+  scoped as sub-issues of #41; chases/dogfights explicitly parked. A jam/breakdown/counter-fire
+  concept for `cepheus_vehicle_v1`'s own version of attacker-side risk (#27) was folded into this
+  design pass too and stayed out of scope — nothing in §3.8's mechanic list covers it either, so it
+  remains unaddressed if ever picked up.
