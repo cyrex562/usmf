@@ -176,7 +176,13 @@ hexes: [{ q, r, terrain: Plains|Forest|Urban|Water|Hill|Road, elevation, movemen
 ```
 Axial coordinates (`q, r`), flat-top or pointy-top chosen once and fixed (pointy-top, standard
 offset for on-screen row alignment). Movement cost and cover are per-hex so terrain-editing in the
-Scenario Editor is just painting hex properties.
+Scenario Editor is just painting hex properties. "Layers" in the Map Editor/Simulation Viewer
+(terrain, vegetation, water presence/absence — #32) are render passes over this same single
+`terrain` value, not independent per-hex fields — e.g. a vegetation-view pass highlights
+`Forest`-terrain hexes rather than reading a separate vegetation field. Decided this way
+deliberately: it ships against the model already built (§4.2, #31) instead of decomposing
+`TerrainType` into orthogonal axes, which stays an option later if a real gameplay need for
+"Hill + Forest simultaneously" shows up.
 
 **Scenario** — a Map + starting force placements + win conditions.
 ```
@@ -521,6 +527,38 @@ makes relationship types data-driven (§2.1) — metadata is data, the resolutio
 the same boundary the relationship-type system already draws between "configurable" and "requires
 code."
 
+### 3.9 Play mode and observation (design settled by #32)
+
+The target feel: Operational Art of War's turn-based operational command meets Dwarf Fortress's
+"historical simulation" mode — set up a Scenario's forces and each side's `StandingOrder`/doctrine
+(§3.2), press play, and watch it resolve, dropping into direct control only when wanted.
+
+- **Single-user director, not multiplayer.** One client owns the whole run — both sides' state,
+  full visibility, no "which side is this client allowed to see/command" concept. This is what
+  the WS sketch in §5 already assumes (one connection, `overrides` keyed by unit id with no side
+  or session field) — #32 is resolved by ratifying that as the actual design rather than something
+  to revisit, not by changing it. True multiplayer (two separate human clients, each restricted to
+  one side) would need real per-side auth/session separation on `WS /api/simulations/:id/stream`;
+  explicitly out of scope unless a future issue reopens it.
+- **Pause-and-override, not pure spectate.** §3.2's `overrides`/`StandingOrder` precedence (override
+  wins outright when present, standing orders drive everything else) already gives this for free:
+  "observe" is the default per-round behavior when a controlling side submits no `overrides`, and
+  "intervene" is submitting `overrides` for specific units before the next `step`/`play` action —
+  OAOW-style direct orders, without needing a separate protocol mode.
+- **Playback speed, not a new tick engine.** "Rate of ticks or based on turns" resolves to: `usmf-sim`'s
+  existing initiative/AP round engine (§3) is the only resolution model — no real-time layer under or
+  alongside turns. `action: "step"` resolves exactly one round; `action: "play"` is the server stepping
+  rounds on a timer (§3.6) whose interval is the client-configurable "tick rate" (pause / 1x / fast /
+  as-fast-as-resolved), not a change to what a round *is*.
+- **Multi-scale, inspectable, logged.** The Simulation Viewer (§4.2) needs to zoom from a strategic
+  overview down to individual combatants, support click-to-inspect on any hex/unit for full detail,
+  and render the accumulating `RoundEvent` stream (§5, `usmf-sim::rng`'s determinism from §3.5 makes
+  this replayable) as a scrollable log alongside the map — not just a live feed. Units render as real
+  MIL-STD-2525/APP-6 symbols (#53, not yet built) rather than plain markers, at a granularity that
+  falls directly out of §2.2's existing `Individual`/`Aggregate` placement choice: an `Individual`
+  `CombatantState` gets its own symbol, an `Aggregate` stack gets one formation-level symbol for the
+  whole placement — no new granularity concept needed for symbology specifically.
+
 ## 4. System architecture
 
 ### 4.1 Rust backend — Cargo workspace at `backend/`
@@ -572,7 +610,9 @@ frontend/src/
     UnitDesigner.vue          # recursive drag-drop TO&E tree (port of V2's unit_designer.html)
     MapEditor.vue             # NEW — paint hex terrain, define a Map
     ScenarioEditor.vue        # NEW — place forces from the Unit tree onto a Map
-    SimulationViewer.vue      # NEW — hex map render, order entry, step/play controls, event log
+    SimulationViewer.vue      # NEW — multi-scale hex map (HexGrid.vue), click-to-inspect,
+                               #       pause-and-override order entry, step/play/speed controls,
+                               #       scrollable RoundEvent log, MIL-STD-2525/APP-6 unit symbols (#53) — see §3.9
   components/                 # shared widgets (HexGrid.vue, StatBar.vue, TreeNode.vue, ...)
   stores/                     # Pinia: useDesignStore, useMapStore, useScenarioStore, useSimStore
   api/
@@ -613,7 +653,8 @@ REST:
 - `GET/POST /api/units/:id/relationships`, `DELETE /api/relationships/:id` (attach/detach, i.e. add
   or end a `UnitRelationship`)
 - `GET/POST /api/relationship-types` (manage the `relationship_type_specs` rule table)
-- `GET/POST /api/maps`, `PUT /api/maps/:id/hexes`
+- `GET/POST /api/maps`, `GET/PUT /api/maps/:id` (whole-map round trip, cells included — implemented
+  in #31; the map-editing unit of work turned out to be the whole map, not a hexes-only sub-route)
 - `GET/POST /api/scenarios`, `POST /api/scenarios/:id/simulations` (start a run)
 - `GET /api/simulations/:id`, `GET /api/simulations/:id/events`
 
@@ -716,10 +757,16 @@ Resolved since this section was last written:
   APP-6 symbology — tracked separately) rather than raw hex-count performance. Landed as part of
   Phase 3 (§7): `MapRepo`/`/api/maps` persistence, `HexGrid.vue`, and a real `MapEditor.vue` painting
   terrain against it, verified live in-browser including the overlay-shape rendering path.
+- ~~Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
+  protocol's auth/session model~~ — decided (#32, see §3.9): single-user director mode (OAOW meets
+  Dwarf Fortress historical-sim) — one client, full visibility, pause-and-override via the
+  `overrides`/`StandingOrder` precedence §3.2 already has, playback-speed control over the existing
+  turn engine rather than a new real-time layer. True multiplayer's per-side auth/session model is
+  explicitly out of scope unless a future issue reopens it. `PUT /api/maps/:id/hexes` in §5 was also
+  stale against #31's actual implementation and corrected to `GET/PUT /api/maps/:id` in the same
+  pass.
 
 Still open, now tracked as individual issues rather than bullets here:
-- Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
-  protocol's auth/session model — #32.
 - MIL-STD-2525/APP-6 unit symbology for the overlay layer §4.2's `HexGrid.vue` now supports — #53.
 - ~~To-hit (§3.3) was still a simple range-scaled chance with no cover, suppression, or elevation
   modifiers~~ — design settled (#28, see §3.8): terrain modifiers extend `CombatContext`, each
