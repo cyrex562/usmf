@@ -382,10 +382,24 @@ apply.
 Two resolvers ship as the built-in set:
 - **`legacy_linear_v1`** — today's range-scaled hit chance against a flat `hit_points` pool; the
   default for any combatant without a more specific ruleset assigned, so nothing regresses while
-  granular/aggregate rulesets are rolled out incrementally.
+  granular/aggregate rulesets are rolled out incrementally. Deliberately stays the simple baseline —
+  attacker-side risk (below) is out of scope for it.
 - **`aggregate_strength_v1`** — a combat-power-ratio CRT (classic wargame odds table: attacker:
   defender combat-power ratio → a results row like "defender −X% strength," "defender eliminated,"
   "no effect," "attacker −X% strength"), reading `CombatProfile.combat_power` (§2.1) on both sides.
+  #16's first cut shipped without the "attacker −X% strength" row this paragraph already sketched —
+  a known simplification, not a design change. #27 confirmed attacker-side loss is wanted here after
+  all: it's this resolver's own stated genre convention, not a novel addition, and initiative-order
+  turn structure (§3.1) doesn't substitute for it — a defender can be destroyed by one attack before
+  ever getting a turn to return fire, so "wait for the round to come back around" isn't equivalent
+  risk. Implementation (redistributing some of the bad-odds columns' "no effect" probability mass
+  into a new `AttackOutcome` variant applied to the *attacker's* `strength_points`, plus a follow-up
+  balance-pass on the changed table per #26's precedent) is tracked separately. `cepheus_vehicle_v1`
+  does not get this — a per-shot penetration pipeline doesn't have an equivalent "the assault itself
+  went wrong" moment the way a CRT roll does; a jam/breakdown/counter-fire concept was considered but
+  needs new mechanical state (jam status, counter-fire targeting) disconnected from a simple outcome
+  addition, so it's left to #28 (the catch-all for cepheus_vehicle_v1's next mechanics pass) if ever
+  picked up, not bundled into this decision.
 
 `cepheus_vehicle_v1` — the granular penetration pipeline (damage dice, SAP/AP armor-ignore, hull/
 structure points, Component Damage Table) — is the first non-legacy resolver to build, once Hull
@@ -562,6 +576,11 @@ Resolved since this section was last written:
   `PENETRATION_TABLE` (`usmf-sim::combat`) are removed; the properties confirmed are pinned by the
   `balance_pass` test module. #37's future `COMPONENT_DAMAGE_TABLE` will need its own such pass once
   it exists.
+- ~~Whether attacker-side losses are wanted at all~~ — decided (#27): yes for
+  `aggregate_strength_v1` (see §3.7 — restores the "attacker −X% strength" row this section's own
+  prose already sketched, and is standard for the genre this resolver is modeled on), no for
+  `cepheus_vehicle_v1` or `legacy_linear_v1`. Implementation (new `AttackOutcome` variant, CRT
+  redistribution, a fresh balance pass on the changed table) tracked separately (#39).
 
 Still open, now tracked as individual issues rather than bullets here:
 - Multiplayer vs. single-player-vs-AI vs. pure sandbox replay, and its effect on the WebSocket
@@ -576,6 +595,5 @@ Still open, now tracked as individual issues rather than bullets here:
   modifiers — the `TerrainType::cover_bonus()` value already exists on the Map model (§2.2) but isn't
   read by combat resolution yet. Folded into #28 alongside the rest of the Cepheus material that
   didn't make it into the #11 milestone (spotting, movement/drive checks, chases, ramming, autofire,
-  HE burst radius).
-- Every `CombatResolver` only depletes the defender's pool; whether attacker-side losses (a standard
-  CRT mechanic) are wanted at all is an open design decision — #27.
+  HE burst radius) — a jam/breakdown/counter-fire concept for `cepheus_vehicle_v1`'s own version of
+  attacker-side risk (#27) is folded in here too, if ever picked up.
